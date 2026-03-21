@@ -1,0 +1,817 @@
+# =============================================================================
+#  annet_architecture.yaml
+#  Machine-readable architecture plan for a real-time SNN closed-loop controller
+#  derived from the MB2018 ANNet MATLAB package.
+#
+#  Created: 2026-03-20
+#  Source:  MB2018 - ANNet (MATLAB/C MEX)
+#  Target:  Python reimplementation for real-time intracranial BCI control
+# =============================================================================
+
+metadata:
+  project: SpikingNeuralNetwork
+  document_type: architecture_plan
+  version: "0.1.0"
+  created: "2026-03-20"
+  upstream_reference: "MB2018 - ANNet"
+  upstream_language: MATLAB + C MEX
+  target_language: Python 3.11+ (NumPy core, optional Numba JIT)
+  design_goals:
+    - "Real-time control signal emission at ≤5 ms latency"
+    - "Minimum viable code — readability over cleverness"
+    - "Build on existing snn.py / server.py / manifesto.json infrastructure"
+    - "Online spike sorting is a bonus, NOT the critical path"
+    - "Offline validation and true sorting happen after the experiment"
+
+# =============================================================================
+#  SECTION 1 — WHAT THE MATLAB PACKAGE DOES (reference documentation)
+# =============================================================================
+
+matlab_annet_summary:
+  purpose: |
+    ANNet is an unsupervised, spike-based neural signal processing pipeline.
+    It ingests raw extracellular electrode recordings sampled at 80 kHz and
+    learns to detect and classify recurring spike waveform patterns without
+    supervision, using biologically plausible STDP learning rules.
+    
+    The network has three sequential stages, each producing a spike train
+    that feeds the next stage.  Data is exchanged via .mat files on disk
+    (offline, batch processing).
+
+  pipeline_overview: |
+    Raw Signal (80 kHz, 1 channel)
+      │
+      ▼
+    ┌─────────────────────────────────────┐
+    │  Attention Neuron (DN)              │  1 LIF neuron, no STDP
+    │  Activity detector / gating signal  │  Synaptic depression dynamics
+    └──────────────┬──────────────────────┘
+                   │ spikeTrainAN (excites L1, gates L2)
+                   ▼
+    ┌─────────────────────────────────────┐
+    │  Intermediate Layer (L1)            │  60 LIF neurons, STDP
+    │  Learns signal waveform templates   │  DN spikes boost all L1 neurons
+    └──────────────┬──────────────────────┘
+                   │ spikeTrainL1 (60 neurons)
+                   ▼
+    ┌─────────────────────────────────────┐
+    │  Output Layer (L2)                  │  10 LIF neurons, STDP + IP
+    │  Classifies L1 patterns into 10     │  DN spikes gate (veto) L2 input
+    │  waveform categories                │  Intrinsic plasticity on threshold
+    └──────────────┬──────────────────────┘
+                   │ spikeTrainL2 (10 neurons = 10 waveform classes)
+                   ▼
+              Classification output
+
+  # ---------------------------------------------------------------------------
+  #  Encoding: Temporal Receptive Field (shared by DN and L1)
+  # ---------------------------------------------------------------------------
+  encoding:
+    name: temporal_receptive_field
+    description: |
+      Converts a continuous analog signal into a population spike code.
+      At each timestep, the signal amplitude activates a subset of
+      amplitude-tuned afferents.  A shift register retains a short
+      temporal history, producing a binary matrix of shape
+      [nCenters × twindow] at each timestep.
+
+    steps:
+      - name: noise_estimation
+        method: "Median Absolute Deviation (MAD)"
+        equation: "s_noise = median(|signal|) / 0.6745"
+        rationale: "Robust to spike contamination, unlike RMS"
+
+      - name: amplitude_bins
+        equation: |
+          DVm     = 1.75 × s_noise          (receptive field half-width)
+          DVi     = DVm × 2 / overlap        (spacing between centers)
+          centers = (min - DVm) : DVi : (max + DVm)
+        result: "nCenters amplitude bins with 10× overlap"
+
+      - name: afferent_activation
+        rule: "if signal ∈ (center_i − DVm, center_i + DVm] → afferent i fires"
+        result: "Binary vector of length nCenters at each timestep"
+
+      - name: temporal_shift_register
+        description: |
+          A shift register of depth (twindow × stepSize) retains history.
+          Subsampled at every stepSize-th position to produce the final
+          spike matrix of shape [nCenters × twindow].
+        total_afferents: "nCenters × twindow"
+
+    parameters:
+      overlap: 10
+      DVm_factor: 1.75
+      step_size: 4             # samples between temporal delays
+      window_depth: 10         # number of delay taps
+      total_window_ms: 0.5     # = window_depth × step_size × dt
+      sampling_rate_hz: 80000
+
+  # ---------------------------------------------------------------------------
+  #  Layer: Attention Neuron (DN)
+  # ---------------------------------------------------------------------------
+  attention_neuron:
+    purpose: |
+      Single LIF neuron acting as an energy/activity detector.
+      Fires when the electrode signal is above the noise floor.
+      Its output spike train serves two roles downstream:
+        1. Excitatory boost to all L1 neurons (+45 to membrane potential)
+        2. Gating veto of L2 input (cancels L1→L2 integration for that step)
+    neuron_count: 1
+    neuron_model: LIF
+    has_stdp: false
+    has_learnable_weights: false
+    weight_mechanism: |
+      Uses synaptic release probability (pRel) instead of weights.
+      pRel models short-term synaptic depression:
+        Recovery: pRel(t) = 1 − (1 − pRel(t_last)) × exp(−Δt / std_t)
+        Depression: pRel(t) = pRel(t) × (1 − std_fd)
+    parameters:
+      tm_samples: 2              # membrane time constant (25 µs)
+      threshold: 108.1
+      reset_potential: 10.5      # soft reset (non-zero)
+      std_t_samples: 400         # depression recovery (5 ms)
+      std_fd: 0.01613            # depression per spike (~1.6%)
+
+  # ---------------------------------------------------------------------------
+  #  Layer: Intermediate (L1) — Template Learners
+  # ---------------------------------------------------------------------------
+  intermediate_layer:
+    purpose: |
+      60 LIF neurons that learn to recognise recurring spatio-temporal
+      patterns in the encoded signal via competitive STDP.  Each neuron
+      becomes a template matcher for a particular waveform shape.
+    neuron_count: 60
+    neuron_model: LIF
+    has_stdp: true
+    competition: winner_take_all_earliest_spike
+    parameters:
+      tm_samples: 2              # membrane time constant (25 µs)
+      threshold: 252.7
+      reset_potential: 0.0       # hard reset
+      refractory_samples: 1
+      dn_excitatory_weight: 45.0
+      initial_weight_range: [0.4, 1.0]
+      weight_bounds: [0.0, 1.0]
+      lateral_inhibition: 0.0    # disabled
+    stdp_rule:
+      type: "asymmetric_hebbian"
+      ltp_amplitude: 0.005
+      ltp_window_samples: 4     # 50 µs
+      ltd_amplitude: -0.00275   # global depression on all synapses at post-spike
+      net_effect: |
+        Afferents active within 4 samples before post-spike:
+          Δw = −0.00275 + 0.005 = +0.00225  (potentiated)
+        All other afferents at post-spike:
+          Δw = −0.00275                       (depressed)
+
+  # ---------------------------------------------------------------------------
+  #  Layer: Output (L2) — Classifiers
+  # ---------------------------------------------------------------------------
+  output_layer:
+    purpose: |
+      10 LIF neurons classify the L1 spike patterns into distinct
+      waveform categories.  Uses delay-expanded L1 spike trains
+      (51 delay taps per L1 neuron = 3060 total afferents), dual
+      positive/negative weights, intrinsic plasticity, and DN gating.
+    neuron_count: 10
+    neuron_model: LIF
+    has_stdp: true
+    has_intrinsic_plasticity: true
+    has_negative_weights: true
+    competition: winner_take_all_max_normalized_potential
+    dn_gating: |
+      When a DN spike occurs at time t, all L1→L2 integration is
+      cancelled for that timestep.  This prevents learning during
+      noise bursts.
+    parameters:
+      tm_samples: 240            # membrane time constant (3 ms)
+      initial_threshold: 140.0
+      threshold_range: [8.0, 140.0]
+      reset_potential_factor: -10  # deep hyperpolarisation (×threshold)
+      refractory_samples: 240     # 3 ms
+      inhibitory_weight_factor: 10 # ×target's threshold
+      delay_taps: 51              # 0 to 50 × 50 µs = 2.5 ms span
+      total_afferents: 3060       # 60 × 51
+      initial_pos_weight_range: [0.0, 1.0]
+      initial_neg_weight: 0.0
+    stdp_rule:
+      ltp_amplitude: 0.05
+      ltp_window_samples: 240    # 3 ms
+      ltd_global_post: -0.035    # depression at every post-spike
+      ltd_window_samples: 16     # 0.2 ms (post→pre pairing)
+      neg_weight_growth_post: 0.005
+    intrinsic_plasticity:
+      description: "Homeostatic threshold adaptation"
+      threshold_decrease_per_spike: -0.01   # multiplicative (−1%)
+      threshold_increase_on_active_input: 0.006  # ×w_eff
+      ip_window_samples: 24
+
+# =============================================================================
+#  SECTION 2 — ASSESSMENT: EXISTING SNN vs. ANNet REQUIREMENTS
+# =============================================================================
+
+existing_infrastructure:
+  files:
+    config.py:
+      role: "All tunable parameters as a plain Python dict (CFG)"
+      reuse: keep_and_extend
+    snn.py:
+      role: "NumPy LIF network, R-STDP learning, encode/decode"
+      reuse: adapt
+      notes: |
+        Current architecture: Input(bits) → Hidden(LIF) → Output(LIF)
+        Uses rate encoding (Bernoulli) and bit-threshold decoding.
+        R-STDP on W_in only, W_out fixed.
+        
+        For the neural signal pipeline we need:
+          - Replace rate encoding with temporal receptive field encoding
+          - Add attention neuron (activity detector) as a new front-end
+          - Repurpose hidden layer as the template-matching L1
+          - Repurpose output layer as the classification L2
+          - Add control signal decoder after output
+    server.py:
+      role: "asyncio UDP receiver, WebSocket viz, HTTP static server"
+      reuse: keep_and_extend
+      notes: |
+        The UDP→asyncio→WebSocket pipeline is exactly what we need.
+        Extend it to:
+          - Accept raw electrode samples over UDP (not just integers)
+          - Emit control signal over a second UDP port (to stim controller)
+          - Keep the WebSocket viz for monitoring
+    manifesto.json:
+      role: "Machine-readable project contract"
+      reuse: update
+    index.html:
+      role: "Browser-based spike raster visualisation"
+      reuse: keep
+
+  verdict: |
+    The existing infrastructure is well-suited as a foundation.
+    The server.py asyncio loop, UDP I/O, and WebSocket monitoring are
+    directly reusable.  snn.py needs a new encoding front-end and the
+    addition of the attention neuron, but the LIF core and STDP machinery
+    are structurally compatible.  We EXTEND rather than SCRAP.
+
+# =============================================================================
+#  SECTION 3 — REAL-TIME ARCHITECTURE PLAN
+# =============================================================================
+
+realtime_plan:
+  target_latency_ms: 5.0
+  sampling_rate_hz: 80000
+  samples_per_5ms: 400
+
+  critical_insight: |
+    We do NOT need to replicate ANNet's full offline sorting pipeline in
+    real-time.  The critical path is:
+    
+      electrode sample → encoding → attention gate → L1 pattern match → control signal
+    
+    The L2 classification layer (spike sorting) is a BONUS for online
+    monitoring but NOT required for control signal emission.  True sorting
+    validation happens offline after the experiment.
+
+  architecture: |
+    ┌──────────────────────────────────────────────────────────────────┐
+    │  UDP IN (raw electrode samples, 80 kHz)                         │
+    │  Format: struct.pack('!Hf', 0xABCD, sample_float32)             │
+    └──────────────┬───────────────────────────────────────────────────┘
+                   │
+                   ▼
+    ┌──────────────────────────────────────────────────────────────────┐
+    │  SpikeEncoder (temporal receptive field)                         │
+    │  - Running MAD noise estimate (exponential moving average)       │
+    │  - Amplitude bins → binary afferent vector                      │
+    │  - Shift register → [nCenters × twindow] spike matrix           │
+    │  - O(nCenters) per sample                                       │
+    └──────────────┬───────────────────────────────────────────────────┘
+                   │ afferent_spikes [nCenters × twindow]
+                   ▼
+    ┌──────────────────────────────────────────────────────────────────┐
+    │  AttentionNeuron (1 LIF, synaptic depression, no STDP)          │
+    │  - Fires when signal energy exceeds noise floor                 │
+    │  - Output: dn_spike (bool)                                      │
+    │  - Purpose: gate downstream integration, excite L1              │
+    └──────┬───────────────────────────────┬───────────────────────────┘
+           │ dn_spike (excitation)         │ dn_spike (gate/veto)
+           ▼                               │
+    ┌──────────────────────────────────┐    │
+    │  L1 — Template Layer             │    │
+    │  N LIF neurons + STDP            │    │
+    │  - DN spike → +boost to all V    │    │
+    │  - Afferent spikes → V via W     │    │
+    │  - WTA competition               │    │
+    │  - Output: which L1 neuron fired │    │
+    └──────────────┬───────────────────┘    │
+                   │ l1_spikes              │
+                   ▼                        ▼
+    ┌──────────────────────────────────────────────────────────────────┐
+    │  ControlDecoder (the minimum-viable control path)               │
+    │                                                                  │
+    │  Option A — Rate window:                                         │
+    │    Count L1 spikes in a sliding window (e.g. 5 ms).              │
+    │    Emit rate vector → linear map → control float.                │
+    │                                                                  │
+    │  Option B — Population vote:                                     │
+    │    Each L1 neuron is assigned a control weight (learned or fixed).│
+    │    On L1 spike, accumulate into leaky control integrator.        │
+    │    Emit control signal when integrator crosses threshold.        │
+    │                                                                  │
+    │  Option C — DN-gated trigger:                                    │
+    │    Emit a control pulse whenever a specific L1 neuron fires      │
+    │    AND the DN is active (signal is not noise).                   │
+    │                                                                  │
+    │  All options output a single float or small vector via UDP OUT.  │
+    └──────────────┬───────────────────────────────────────────────────┘
+                   │
+                   ▼
+    ┌──────────────────────────────────────────────────────────────────┐
+    │  UDP OUT (control signal to experiment controller)              │
+    │  Format: struct.pack('!ff', control_value, confidence)           │
+    │  Target port: configurable                                       │
+    └──────────────────────────────────────────────────────────────────┘
+    
+                   │  (parallel, non-critical path)
+                   ▼
+    ┌──────────────────────────────────────────────────────────────────┐
+    │  L2 — Classification Layer (OPTIONAL, online monitoring only)    │
+    │  10 LIF neurons, STDP + IP, delay-expanded L1 input             │
+    │  Can run in a separate thread or be disabled entirely            │
+    └──────────────┬───────────────────────────────────────────────────┘
+                   │
+                   ▼
+    ┌──────────────────────────────────────────────────────────────────┐
+    │  WebSocket OUT (browser viz — spike rasters, control trace)      │
+    │  Existing index.html raster + new control signal overlay         │
+    └──────────────────────────────────────────────────────────────────┘
+
+  # ---------------------------------------------------------------------------
+  #  Streaming loop design (replaces ANNet's 3-stage batch pipeline)
+  # ---------------------------------------------------------------------------
+  streaming_loop:
+    description: |
+      All layers run in a SINGLE asyncio loop, sample-by-sample.
+      No .mat files, no inter-stage serialisation.  The three ANNet stages
+      become three method calls within one tick of the loop.
+      
+      The event-driven LIF update (only compute when a spike arrives) is
+      preserved from ANNet — this is the key performance enabler.  We do
+      NOT iterate over all neurons at every sample; only neurons receiving
+      input are touched.
+
+    pseudocode: |
+      async def sim_loop(sample_queue):
+          encoder = SpikeEncoder(cfg)
+          dn      = AttentionNeuron(cfg)
+          l1      = TemplateLayer(cfg)
+          decoder = ControlDecoder(cfg)
+          # l2    = ClassificationLayer(cfg)  # optional
+          
+          while True:
+              sample = await sample_queue.get()       # raw float from electrode
+              
+              afferents = encoder.step(sample)         # [nCenters × twindow] bool
+              dn_spike  = dn.step(afferents)           # bool
+              l1_spikes = l1.step(afferents, dn_spike) # bool array [n_l1]
+              
+              control   = decoder.step(l1_spikes, dn_spike)
+              if control is not None:
+                  send_udp(control)                    # → experiment controller
+              
+              # Optional: l2.step(l1_spikes, dn_spike)
+              
+              if step_count % BROADCAST_EVERY == 0:
+                  broadcast_ws(spikes, control)        # → browser viz
+
+  # ---------------------------------------------------------------------------
+  #  Performance budget
+  # ---------------------------------------------------------------------------
+  performance_budget:
+    constraint: "≤5 ms end-to-end from sample arrival to control emission"
+    budget_breakdown:
+      udp_receive_us: 10         # kernel → userspace, negligible
+      encoding_us: 50            # O(nCenters) comparisons + shift register
+      attention_neuron_us: 5     # 1 LIF update
+      l1_layer_us: 200           # worst case: all afferents active, 60 neurons
+      control_decoder_us: 10     # leaky integrator or rate count
+      udp_send_us: 10            # userspace → kernel, negligible
+      total_per_sample_us: 285   # ~0.3 ms per sample
+      samples_in_5ms: 400        # 80 kHz × 5 ms
+      total_for_5ms_window_us: 285  # event-driven: only process when spikes arrive
+    notes: |
+      The event-driven LIF model means we do NOT iterate 400 times per 5 ms.
+      We only update neurons when an afferent spike arrives.  With the temporal
+      receptive field encoding, only ~10 of ~300 afferents are active per sample
+      (due to the amplitude bin overlap of 10).  This dramatically reduces work.
+      
+      NumPy vectorisation handles the L1 weight lookup + membrane update in a
+      single array operation.  If profiling shows NumPy overhead is too high
+      for per-sample calls, Numba @jit on the inner loop is the escape hatch.
+
+# =============================================================================
+#  SECTION 4 — PROPOSED FILE STRUCTURE & MODULE API
+# =============================================================================
+
+proposed_modules:
+  overview: |
+    We extend the existing project with 3 new files and modify 2 existing ones.
+    No external dependencies beyond numpy (already required).
+    Numba is an optional accelerator, not a hard dependency.
+
+  files:
+    config.py:
+      action: extend
+      additions: |
+        Add an "electrode" section to CFG with encoding, attention neuron,
+        L1, and control decoder parameters.  Keep existing SNN params for
+        backward compatibility (the original binary I/O mode still works).
+
+    encoder.py:
+      action: create_new
+      purpose: "Temporal receptive field encoder + attention neuron"
+      classes:
+        - name: SpikeEncoder
+          responsibility: |
+            Maintains shift register, amplitude bins, running noise estimate.
+            One method: step(sample: float) → np.ndarray (bool, flat afferent vector)
+          key_state:
+            - centers: np.ndarray         # amplitude bin centers
+            - dvm: float                   # receptive field half-width
+            - shift_register: np.ndarray   # [nCenters × (stepSize × twindow)] bool
+            - noise_estimate: float        # running MAD
+
+        - name: AttentionNeuron
+          responsibility: |
+            Single LIF neuron with synaptic depression (pRel).
+            One method: step(afferents: np.ndarray) → bool
+          key_state:
+            - v: float                     # membrane potential
+            - p_rel: np.ndarray            # release probabilities per afferent
+            - last_spike_time: np.ndarray  # per afferent, for pRel recovery
+
+    snn.py:
+      action: extend
+      changes: |
+        Add a TemplateLayer class alongside the existing Network class.
+        TemplateLayer wraps N LIF neurons with STDP, DN excitation input,
+        and WTA competition.  Structurally similar to the existing Network
+        but with:
+          - Afferent spike input (not bit-encoded integers)
+          - DN excitatory boost on all neurons
+          - Asymmetric STDP (not reward-modulated)
+          - WTA by earliest spike, not by output decoding
+        
+        The existing Network class remains untouched for backward compat.
+      classes:
+        - name: TemplateLayer
+          responsibility: "L1 pattern-matching layer"
+          methods:
+            - "step(afferents, dn_spike) → np.ndarray (bool, n_neurons)"
+            - "get_weights() → np.ndarray (for offline analysis)"
+          key_state:
+            - W: np.ndarray               # [n_afferents × n_neurons] weights
+            - V: np.ndarray               # [n_neurons] membrane potentials
+            - last_post_spike: np.ndarray  # [n_neurons] for STDP
+
+    decoder.py:
+      action: create_new
+      purpose: "Control signal decoder — converts L1 spikes to control output"
+      classes:
+        - name: ControlDecoder
+          responsibility: |
+            Converts L1 spike activity into a scalar control signal.
+            Supports multiple strategies (selected via config):
+              - "rate": sliding window spike count → weighted sum
+              - "population": leaky integrator per neuron → threshold
+              - "trigger": specific neuron fires + DN active → pulse
+          methods:
+            - "step(l1_spikes, dn_active) → Optional[float]"
+            - "reset() → None"
+          key_state:
+            - integrator: np.ndarray   # leaky accumulator per L1 neuron
+            - control_weights: np.ndarray  # maps L1 neurons → control value
+            - spike_buffer: deque      # for rate-window mode
+
+    server.py:
+      action: extend
+      changes: |
+        Add a second UDP protocol class (ElectrodeReceiver) for raw samples.
+        Add a UDP sender for control signal output.
+        Add a new sim_loop_electrode() coroutine that runs the encoder →
+        attention → L1 → decoder pipeline.
+        Keep the existing sim_loop() for the binary I/O mode.
+        A config flag ("mode": "electrode" | "binary") selects which loop runs.
+
+    manifesto.json:
+      action: update
+      changes: |
+        Add electrode mode to io_contract, document new UDP formats,
+        add control_output section, reference new files.
+
+# =============================================================================
+#  SECTION 5 — CONFIGURATION SCHEMA (additions to config.py)
+# =============================================================================
+
+config_additions:
+  electrode_mode:
+    # ── Signal input ──
+    mode: "electrode"             # "electrode" or "binary" (existing)
+    sampling_rate_hz: 80000
+    udp_electrode_port: 9001      # separate from existing binary port 9000
+    udp_control_port: 9002        # outgoing control signal
+
+    # ── Temporal receptive field encoding ──
+    encoding:
+      overlap: 10
+      dvm_factor: 1.75
+      step_size: 4
+      window_depth: 10
+      noise_window_samples: 8000  # initial MAD estimation window
+      noise_ema_alpha: 0.001      # exponential moving average for online MAD
+
+    # ── Attention neuron ──
+    attention:
+      tm_samples: 2
+      threshold_factor: 0.4252    # threshold = factor × overlap × window × ...
+      reset_potential_factor: 0.15
+      depression_tau_samples: 400
+      depression_fraction: 0.01613
+
+    # ── Template layer (L1) ──
+    template_layer:
+      n_neurons: 60
+      tm_samples: 2
+      threshold_factor: null      # auto-computed from encoding params
+      reset_potential: 0.0
+      refractory_samples: 1
+      dn_weight: 45.0
+      initial_weight_range: [0.4, 1.0]
+      weight_bounds: [0.0, 1.0]
+      stdp:
+        ltp_amplitude: 0.005
+        ltp_window_samples: 4
+        ltd_amplitude: -0.00275
+      freeze_stdp: false          # set true after training to lock weights
+
+    # ── Control decoder ──
+    control_decoder:
+      strategy: "rate"            # "rate", "population", or "trigger"
+      window_ms: 5.0              # sliding window for rate strategy
+      control_weights: null       # null = uniform; or [n_neurons] array
+      threshold: 0.5              # for population/trigger strategies
+      leaky_tau_ms: 10.0          # integrator time constant
+
+    # ── Optional classification layer (L2) ──
+    classification_layer:
+      enabled: false              # set true for online sorting monitor
+      n_neurons: 10
+      tm_samples: 240
+      delay_taps: 51
+      # ... (full params deferred to implementation phase)
+
+# =============================================================================
+#  SECTION 6 — CLOSED-LOOP CONTROL STRATEGIES
+# =============================================================================
+
+closed_loop_control:
+  overview: |
+    The SNN's job in the closed loop is to convert electrode activity into a
+    low-latency control signal that an experiment controller can act on.
+    The control signal does NOT need to be a spike-sorted unit identity.
+    It can be a scalar (stimulation amplitude), a boolean (stimulate / don't),
+    or a small vector (multi-channel stim pattern).
+
+  output_format:
+    protocol: UDP
+    port: 9002  # configurable
+    frame: "struct.pack('!ff', control_value, confidence)"
+    fields:
+      - name: control_value
+        type: float32
+        range: [-1.0, 1.0]
+        description: "Primary control signal — maps to stimulation parameter"
+      - name: confidence
+        type: float32
+        range: [0.0, 1.0]
+        description: |
+          Gating confidence based on DN activity.
+          0.0 = DN silent (noise/quiet) → suppress stimulation
+          1.0 = DN active (real spikes detected) → trust control_value
+
+  strategies:
+    - name: rate_window
+      description: |
+        Count L1 spikes per neuron in a sliding 5 ms window.
+        Multiply by control_weights vector, sum to scalar.
+        Low complexity, smooth output, inherent 5 ms latency.
+      latency_ms: 5.0
+      when_to_use: "Default. Good for continuous control (e.g. stim amplitude)"
+
+    - name: population_vote
+      description: |
+        Each L1 neuron has a learned/assigned control weight.
+        On each L1 spike, add its weight to a leaky integrator.
+        Emit control signal when integrator crosses threshold.
+        Sub-millisecond latency possible (fires on first spike).
+      latency_ms: "<1.0 (spike-triggered)"
+      when_to_use: "When minimum latency matters more than smoothness"
+
+    - name: dn_gated_trigger
+      description: |
+        Emit a fixed control pulse whenever ANY L1 neuron fires AND
+        the DN has been active in the last N ms.  Simplest possible.
+        Binary output: stimulate or don't.
+      latency_ms: "<0.5 (immediate on spike)"
+      when_to_use: "Binary stim/no-stim decisions, maximum simplicity"
+
+  dn_as_confidence_gate: |
+    The attention neuron (DN) firing rate is a natural signal quality
+    indicator.  It fires when the electrode signal contains real
+    neural spikes (energy above noise floor) and goes silent during
+    quiet/noise-only periods.
+    
+    Use DN spike rate in a short window (e.g. 5 ms) as the confidence
+    field in the control output.  The experiment controller can then
+    suppress stimulation when confidence is low, preventing spurious
+    control during noise bursts.
+
+  calibration: |
+    Before the experiment:
+      1. Run with freeze_stdp=false for a calibration period (e.g. 60s)
+         while recording known neural activity (passive observation)
+      2. Inspect L1 weight matrices to verify template formation
+         (use the existing WebSocket viz or offline plotting)
+      3. Set freeze_stdp=true to lock templates
+      4. Assign control_weights (manually or via a short supervised mapping)
+      5. Begin closed-loop experiment
+    
+    During the experiment:
+      - Weights are frozen — deterministic, repeatable behavior
+      - DN continues to gate noise in real-time
+      - All raw data + spike trains are logged for offline validation
+
+  offline_validation: |
+    After the experiment:
+      1. Load the logged raw electrode data
+      2. Run full ANNet pipeline (or a Python equivalent with L2 enabled)
+         in offline batch mode with no time constraints
+      3. Compare online L1 spike trains vs. offline sorted units
+      4. Compute correlation between control signals and behavioural events
+      5. Adjust control_weights and re-run if needed
+
+# =============================================================================
+#  SECTION 7 — IMPLEMENTATION ROADMAP (ordered milestones)
+# =============================================================================
+
+implementation_roadmap:
+  - milestone: "M0 — Encoder + Attention Neuron"
+    files: [encoder.py, config.py]
+    deliverable: |
+      SpikeEncoder and AttentionNeuron classes.
+      Unit test: feed a synthetic 80 kHz sinusoid, verify afferent spike
+      matrix shape and DN firing rate.
+    effort: small
+    priority: critical
+
+  - milestone: "M1 — Template Layer"
+    files: [snn.py]
+    deliverable: |
+      TemplateLayer class added to snn.py.
+      Unit test: feed encoder output + DN spikes into L1, verify
+      WTA competition and STDP weight convergence on repeated patterns.
+    effort: medium
+    priority: critical
+    depends_on: [M0]
+
+  - milestone: "M2 — Control Decoder"
+    files: [decoder.py, config.py]
+    deliverable: |
+      ControlDecoder class with rate_window strategy.
+      Unit test: feed synthetic L1 spike trains, verify control signal
+      output and DN gating.
+    effort: small
+    priority: critical
+    depends_on: [M1]
+
+  - milestone: "M3 — Server Integration"
+    files: [server.py, config.py, manifesto.json]
+    deliverable: |
+      Electrode mode added to server.py.
+      New UDP receiver for raw samples, new UDP sender for control.
+      End-to-end test: synthetic electrode signal → UDP in → SNN →
+      control signal → UDP out.
+    effort: medium
+    priority: critical
+    depends_on: [M0, M1, M2]
+
+  - milestone: "M4 — Latency Profiling"
+    files: []
+    deliverable: |
+      Measure end-to-end latency under realistic load (80 kHz stream).
+      If >5 ms, apply Numba @jit to encoder and L1 inner loops.
+      Document results.
+    effort: small
+    priority: high
+    depends_on: [M3]
+
+  - milestone: "M5 — Browser Viz Update"
+    files: [index.html]
+    deliverable: |
+      Add control signal trace overlay to the existing spike raster.
+      Show DN activity as a separate row.  Show confidence gauge.
+    effort: small
+    priority: medium
+    depends_on: [M3]
+
+  - milestone: "M6 — Classification Layer (L2, optional)"
+    files: [snn.py, config.py]
+    deliverable: |
+      ClassificationLayer class (delay-expanded input, dual weights, IP).
+      Runs in a separate thread or is toggled via config.
+      This is the full ANNet L2 reimplementation for online monitoring.
+    effort: large
+    priority: low
+    depends_on: [M1]
+
+  - milestone: "M7 — Offline Validation Suite"
+    files: [validate.py]
+    deliverable: |
+      Script to load logged data, run the full pipeline offline,
+      compare online vs. offline spike trains, generate report.
+    effort: medium
+    priority: medium
+    depends_on: [M6]
+
+# =============================================================================
+#  SECTION 8 — KEY EQUATIONS REFERENCE (for implementors)
+# =============================================================================
+
+equations:
+  lif_update:
+    continuous: "τ_m × dV/dt = −(V − V_reset) + I_syn"
+    discrete: "V += (dt / τ_m) × (−(V − V_reset) + I_syn)"
+    event_driven: "V(t) = V(t_last) × exp(−Δt / τ_m) + w"
+    note: |
+      The event-driven form is used in ANNet (no dt loop; update only on
+      spike arrival).  For real-time, this is more efficient than Euler
+      since we skip silent timesteps.
+
+  mad_noise:
+    equation: "σ_noise = median(|x|) / 0.6745"
+    online: "Use exponential moving average of |x| for streaming MAD"
+
+  synaptic_depression:
+    recovery: "pRel(t) = 1 − (1 − pRel(t_last)) × exp(−Δt / τ_d)"
+    depression: "pRel(t) *= (1 − f_d)"
+    parameters:
+      tau_d: 400  # samples
+      f_d: 0.01613
+
+  stdp_l1:
+    ltp: "Δw = +A_plus    if t_post − t_pre ≤ window"
+    ltd: "Δw = −A_minus   for ALL synapses at post-spike"
+    net_causal: "Δw = A_plus − A_minus = +0.00225"
+    bounds: "[0, 1]"
+
+  intrinsic_plasticity_l2:
+    on_fire: "θ += −0.01 × θ  (multiplicative decrease)"
+    on_active_input: "θ += 0.006 × w_eff"
+    bounds: "[8, 140]"
+
+# =============================================================================
+#  SECTION 9 — RISKS AND MITIGATIONS
+# =============================================================================
+
+risks:
+  - risk: "Python per-sample overhead at 80 kHz may exceed 5 ms budget"
+    likelihood: medium
+    mitigation: |
+      1. Event-driven updates (not per-sample) dramatically reduce work
+      2. NumPy vectorised operations for batch afferent processing
+      3. Numba @njit on hot inner loops (encoder shift, LIF update)
+      4. Buffer N samples and process in batch if single-sample is too slow
+    fallback: "Port hot loops to C extension (like ANNet's MEX files)"
+
+  - risk: "STDP may not converge online with real electrode noise"
+    likelihood: low
+    mitigation: |
+      1. Use calibration period with freeze_stdp=false
+      2. DN gating suppresses noise-driven plasticity
+      3. MAD-based noise estimation is robust to outliers
+      4. Can initialise weights from offline-trained values
+
+  - risk: "Control signal may be too noisy for closed-loop use"
+    likelihood: medium
+    mitigation: |
+      1. DN confidence gating suppresses output during noise
+      2. Leaky integrator smooths spike-to-spike jitter
+      3. Adjustable window size trades latency for smoothness
+      4. Threshold on control signal prevents sub-threshold triggers
+
+  - risk: "UDP packet loss under heavy load"
+    likelihood: low
+    mitigation: |
+      1. UDP is fire-and-forget; acceptable for control signals
+      2. Experiment controller should timeout and hold last value
+      3. Raw data logging uses a separate reliable channel (file/TCP)

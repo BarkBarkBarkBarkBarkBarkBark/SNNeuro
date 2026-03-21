@@ -1,0 +1,4 @@
+numpy>=1.24
+websockets>=10
+mne>=1.6
+mne-lsl>=1.4

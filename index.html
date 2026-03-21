@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>SNN Agent</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: #0d0d0d;
+  color: #666;
+  font-family: 'Courier New', monospace;
+  padding: 18px;
+  user-select: none;
+}
+
+h1 {
+  color: #00ff2f;
+  font-size: 0.95rem;
+  letter-spacing: 3px;
+  margin-bottom: 12px;
+}
+
+.panel-label {
+  color: #3a3a3a;
+  font-size: 0.65rem;
+  letter-spacing: 2px;
+  margin: 8px 0 3px 0;
+}
+
+canvas {
+  display: block;
+  border: 1px solid #181818;
+  background: #020202;
+  image-rendering: pixelated;
+}
+
+#stats {
+  margin-top: 8px;
+  font-size: 0.72rem;
+  color: #3a3a3a;
+  letter-spacing: 1px;
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+
+.stat-val  { color: #00ff41; }
+.stat-dn   { color: #ff6600; }
+.stat-ctrl { color: #00ccff; }
+
+#ctrl {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+}
+
+button {
+  background: #111;
+  color: #00ff41;
+  border: 1px solid #1a3d1a;
+  padding: 5px 18px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.72rem;
+  letter-spacing: 1px;
+  transition: background 0.1s, color 0.1s;
+}
+
+button:hover { background: #00ff41; color: #000; }
+button:active { background: #00cc33; }
+
+#status {
+  margin-top: 7px;
+  font-size: 0.65rem;
+  color: #282828;
+}
+</style>
+</head>
+<body>
+
+<h1>⚡ SNN AGENT — LIVE SPIKE RASTER</h1>
+
+<!-- Waveform canvas -->
+<div class="panel-label">RAW SIGNAL</div>
+<canvas id="wave" width="900" height="120"></canvas>
+
+<!-- DN tick strip -->
+<div class="panel-label">ATTENTION NEURON (DN)</div>
+<canvas id="dn_cv" width="900" height="16"></canvas>
+
+<!-- L1 spike raster -->
+<div class="panel-label">TEMPLATE LAYER (L1) — 60 NEURONS</div>
+<canvas id="raster" width="900" height="180"></canvas>
+
+<!-- Control signal trace -->
+<div class="panel-label">CONTROL SIGNAL</div>
+<canvas id="ctrl_cv" width="900" height="60"></canvas>
+
+<div id="stats">
+  <span>t = <span class="stat-val" id="s_t">—</span></span>
+  <span>sample = <span class="stat-val" id="s_sample">—</span></span>
+  <span>DN = <span class="stat-dn" id="s_dn">—</span></span>
+  <span>L1 spikes/s = <span class="stat-val" id="s_l1hz">—</span></span>
+  <span>control = <span class="stat-ctrl" id="s_ctrl">—</span></span>
+  <span>confidence = <span class="stat-ctrl" id="s_conf">—</span></span>
+</div>
+
+<div id="ctrl">
+  <button onclick="send_reward(1)">✅ REWARD  +1</button>
+  <button onclick="send_reward(0)">⬜ NEUTRAL  0</button>
+  <button onclick="send_reward(-1)">❌ PUNISH  −1</button>
+</div>
+
+<div id="status">● connecting…</div>
+
+<script>
+// ── Config ────────────────────────────────────────────────────────────────────
+const WS_PORT    = 8765;
+const N_L1       = 60;
+const CVW        = 900;
+const WAVE_H     = 120;
+const DN_H       = 16;
+const RASTER_H   = 180;
+const CTRL_H     = 60;
+const ROW_H      = RASTER_H / N_L1;
+const COL_W      = 2;
+
+// ── Canvas contexts ───────────────────────────────────────────────────────────
+const waveCv  = document.getElementById('wave');
+const waveCtx = waveCv.getContext('2d');
+
+const dnCv    = document.getElementById('dn_cv');
+const dnCtx   = dnCv.getContext('2d');
+
+const rastCv  = document.getElementById('raster');
+const rastCtx = rastCv.getContext('2d');
+
+const ctrlCv  = document.getElementById('ctrl_cv');
+const ctrlCtx = ctrlCv.getContext('2d');
+
+function clearCv(ctx, w, h) { ctx.fillStyle = '#020202'; ctx.fillRect(0, 0, w, h); }
+clearCv(waveCtx, CVW, WAVE_H);
+clearCv(dnCtx,   CVW, DN_H);
+clearCv(rastCtx, CVW, RASTER_H);
+clearCv(ctrlCtx, CVW, CTRL_H);
+
+// ── Pending data from WebSocket ───────────────────────────────────────────────
+let pendingSpikes  = [];
+let pendingDN      = 0;
+let pendingSample  = 0;
+let pendingControl = 0;
+let hasNew         = false;
+
+// Waveform auto-scaling
+let waveMax = 1e-6;
+
+// ── Render loop ───────────────────────────────────────────────────────────────
+function render() {
+  if (!hasNew) { requestAnimationFrame(render); return; }
+  hasNew = false;
+
+  // ── Waveform ────────────────────────────────────────────────────────
+  waveCtx.drawImage(waveCv, -COL_W, 0);
+  waveCtx.fillStyle = '#020202';
+  waveCtx.fillRect(CVW - COL_W, 0, COL_W, WAVE_H);
+
+  // center line
+  waveCtx.strokeStyle = '#111';
+  waveCtx.lineWidth = 0.5;
+  waveCtx.beginPath();
+  waveCtx.moveTo(CVW - COL_W, WAVE_H / 2);
+  waveCtx.lineTo(CVW, WAVE_H / 2);
+  waveCtx.stroke();
+
+  // auto-scale
+  const absS = Math.abs(pendingSample);
+  if (absS > waveMax) waveMax = absS * 1.2;
+  waveMax *= 0.9998;  // slow decay
+  if (waveMax < 1e-10) waveMax = 1e-10;
+
+  const yNorm = pendingSample / waveMax;  // [-1, 1]
+  const y = WAVE_H / 2 - yNorm * (WAVE_H / 2 - 2);
+  const cy = Math.max(1, Math.min(WAVE_H - 1, y));
+
+  // green dot
+  waveCtx.fillStyle = '#00ff41';
+  waveCtx.fillRect(CVW - COL_W, cy - 1, COL_W, 2);
+
+  // orange tint behind waveform when DN fires
+  if (pendingDN) {
+    waveCtx.fillStyle = 'rgba(255, 102, 0, 0.2)';
+    waveCtx.fillRect(CVW - COL_W, 0, COL_W, WAVE_H);
+  }
+
+  // ── DN strip ────────────────────────────────────────────────────────
+  dnCtx.drawImage(dnCv, -COL_W, 0);
+  dnCtx.fillStyle = pendingDN ? '#ff6600' : '#020202';
+  dnCtx.fillRect(CVW - COL_W, 0, COL_W, DN_H);
+
+  // ── L1 raster ──────────────────────────────────────────────────────
+  rastCtx.drawImage(rastCv, -COL_W, 0);
+  rastCtx.fillStyle = '#020202';
+  rastCtx.fillRect(CVW - COL_W, 0, COL_W, RASTER_H);
+
+  // grid every 10 neurons
+  rastCtx.strokeStyle = '#0d0d0d';
+  rastCtx.lineWidth = 0.5;
+  for (let i = 0; i <= N_L1; i += 10) {
+    const gy = i * ROW_H;
+    rastCtx.beginPath();
+    rastCtx.moveTo(CVW - COL_W, gy);
+    rastCtx.lineTo(CVW, gy);
+    rastCtx.stroke();
+  }
+
+  rastCtx.fillStyle = '#00ff41';
+  for (const id of pendingSpikes) {
+    if (id < N_L1) {
+      rastCtx.fillRect(CVW - COL_W, id * ROW_H, COL_W, Math.max(1, ROW_H - 0.5));
+    }
+  }
+
+  // ── Control signal ─────────────────────────────────────────────────
+  ctrlCtx.drawImage(ctrlCv, -COL_W, 0);
+  ctrlCtx.fillStyle = '#020202';
+  ctrlCtx.fillRect(CVW - COL_W, 0, COL_W, CTRL_H);
+
+  // zero line
+  ctrlCtx.strokeStyle = '#111';
+  ctrlCtx.lineWidth = 0.5;
+  ctrlCtx.beginPath();
+  ctrlCtx.moveTo(CVW - COL_W, CTRL_H / 2);
+  ctrlCtx.lineTo(CVW, CTRL_H / 2);
+  ctrlCtx.stroke();
+
+  const cn = Math.max(-1, Math.min(1, pendingControl));
+  const ccy = CTRL_H / 2 - cn * (CTRL_H / 2 - 2);
+  ctrlCtx.fillStyle = '#00ccff';
+  ctrlCtx.fillRect(CVW - COL_W, ccy - 1, COL_W, 2);
+
+  pendingSpikes = [];
+  requestAnimationFrame(render);
+}
+requestAnimationFrame(render);
+
+// ── Stats (once per second) ───────────────────────────────────────────────────
+let totalL1 = 0, totalDN = 0, lastCheck = performance.now();
+
+function updateStats(t, spikes, dn, ctrl, conf, sample) {
+  totalL1 += spikes.length;
+  totalDN += dn;
+  const now = performance.now();
+  if (now - lastCheck >= 1000) {
+    const dt = (now - lastCheck) / 1000;
+    document.getElementById('s_t').textContent     = t;
+    document.getElementById('s_sample').textContent = sample.toExponential(3);
+    document.getElementById('s_dn').textContent     = `${(totalDN / dt).toFixed(0)} fires/s`;
+    document.getElementById('s_l1hz').textContent   = (totalL1 / dt).toFixed(0);
+    document.getElementById('s_ctrl').textContent   = ctrl.toFixed(4);
+    document.getElementById('s_conf').textContent   = conf.toFixed(4);
+    totalL1 = 0; totalDN = 0; lastCheck = now;
+  }
+}
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+let ws = null;
+function connect() {
+  ws = new WebSocket(`ws://localhost:${WS_PORT}`);
+  ws.onopen = () => {
+    document.getElementById('status').textContent = '● connected';
+    document.getElementById('status').style.color = '#00ff41';
+  };
+  ws.onclose = () => {
+    document.getElementById('status').textContent = '● disconnected — retrying in 2s…';
+    document.getElementById('status').style.color = '#282828';
+    setTimeout(connect, 2000);
+  };
+  ws.onerror = () => ws.close();
+  ws.onmessage = ({ data }) => {
+    const msg = JSON.parse(data);
+    const spikes = msg.spikes || [];
+    const dn     = msg.dn     || 0;
+    const ctrl   = msg.control    ?? 0;
+    const conf   = msg.confidence ?? 0;
+    const sample = msg.sample     ?? 0;
+
+    pendingSpikes  = spikes;
+    pendingDN      = dn;
+    pendingSample  = sample;
+    pendingControl = ctrl;
+    hasNew         = true;
+
+    updateStats(msg.t, spikes, dn, ctrl, conf, sample);
+  };
+}
+connect();
+
+function send_reward(r) {
+  if (ws && ws.readyState === WebSocket.OPEN)
+    ws.send(JSON.stringify({ reward: r }));
+}
+</script>
+</body>
+</html>

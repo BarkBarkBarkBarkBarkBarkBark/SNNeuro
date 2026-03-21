@@ -1,0 +1,111 @@
+{
+  "version": "2.0.0",
+  "created": "2026-03-13",
+  "updated": "2026-03-20",
+  "project": "SpikingNeuralNetwork",
+  "description": "General-purpose spiking neural network agent. Supports two modes: (1) binary I/O with R-STDP learning via UDP, and (2) electrode mode — real-time intracranial signal processing derived from ANNet (MB2018), producing a closed-loop control signal for experiment hardware. LIF neurons, STDP learning, temporal receptive field encoding, attention neuron gating. Configurable via config.py.",
+
+  "goals": [
+    "Serve as a reusable intelligent agent primitive",
+    "Accept arbitrary binary data streams as input via UDP (binary mode)",
+    "Accept raw electrode samples at 80 kHz via UDP (electrode mode)",
+    "Emit a real-time control signal for closed-loop experiments (≤5 ms latency)",
+    "Learn neural spike waveform templates via unsupervised STDP",
+    "Gate noise via an attention neuron (synaptic depression activity detector)",
+    "Provide live spike raster visualisation in the browser",
+    "Remain minimal, dependency-light, and easy to maintain"
+  ],
+
+  "files": {
+    "config":    { "path": "config.py",      "role": "All tunable parameters — mode selection, network topology, encoding, STDP, control decoder, ports" },
+    "network":   { "path": "snn.py",         "role": "NumPy LIF neurons: Network (binary R-STDP) + TemplateLayer (electrode STDP + WTA)" },
+    "encoder":   { "path": "encoder.py",     "role": "SpikeEncoder (temporal receptive field) + AttentionNeuron (LIF with synaptic depression)" },
+    "decoder":   { "path": "decoder.py",     "role": "ControlDecoder — converts L1 spikes to control signal (rate / population / trigger)" },
+    "server":    { "path": "server.py",      "role": "asyncio: UDP input, UDP control output, WebSocket viz, HTTP static files. Dual mode." },
+    "frontend":  { "path": "index.html",     "role": "Canvas 2D spike raster, vanilla JS, reward/punish buttons" },
+    "test_bin":  { "path": "test_sender.py", "role": "Utility: send test UDP binary frames to a running agent (binary mode)" },
+    "test_elec": { "path": "test_electrode.py", "role": "Utility: send synthetic electrode signal via UDP (electrode mode)" },
+    "arch":      { "path": "annet_architecture.yaml", "role": "Machine-readable architecture plan derived from ANNet MATLAB package" },
+    "manifesto": { "path": "manifesto.json", "role": "This file: machine-readable project contract" }
+  },
+
+  "dependencies": {
+    "python":  ">=3.11",
+    "pip":     ["numpy", "websockets"],
+    "stdlib":  ["asyncio", "socket", "struct", "json", "threading", "http.server", "pathlib", "collections"]
+  },
+
+  "io_contract": {
+    "binary_mode": {
+      "input": {
+        "protocol":    "UDP",
+        "default_port": 9000,
+        "frame_format": "struct.pack('!HI', magic, value)",
+        "frame_fields": [
+          { "name": "magic", "type": "uint16", "value": "0xABCD" },
+          { "name": "value", "type": "uint32", "note": "input integer" }
+        ]
+      }
+    },
+    "electrode_mode": {
+      "input": {
+        "protocol":    "UDP",
+        "default_port": 9001,
+        "frame_format": "struct.pack('!Hf', magic, sample)",
+        "frame_fields": [
+          { "name": "magic", "type": "uint16", "value": "0xABCD" },
+          { "name": "sample", "type": "float32", "note": "raw electrode sample (µV)" }
+        ],
+        "expected_rate_hz": 80000
+      },
+      "control_output": {
+        "protocol":    "UDP",
+        "default_port": 9002,
+        "frame_format": "struct.pack('!ff', control_value, confidence)",
+        "frame_fields": [
+          { "name": "control_value", "type": "float32", "range": [-1.0, 1.0], "note": "primary control signal" },
+          { "name": "confidence", "type": "float32", "range": [0.0, 1.0], "note": "DN-based signal quality gate" }
+        ]
+      }
+    },
+    "visualization": {
+      "protocol":    "WebSocket",
+      "default_port": 8765,
+      "message_format_binary": { "t": "int", "spikes": "list[int]", "out": "int" },
+      "message_format_electrode": { "t": "int", "spikes": "list[int]", "dn": "int", "control": "float", "confidence": "float" }
+    },
+    "control": {
+      "protocol": "WebSocket (bidirectional)",
+      "default_port": 8765,
+      "commands": [
+        { "key": "reward", "type": "float", "range": [-1.0, 1.0] }
+      ]
+    }
+  },
+
+  "architecture": {
+    "binary_mode": {
+      "layers": [
+        { "name": "input",  "size": "input_bit_width",  "type": "rate encoding" },
+        { "name": "hidden", "size": "n_hidden",          "type": "LIF, R-STDP" },
+        { "name": "output", "size": "output_bit_width",  "type": "LIF, fixed weights" }
+      ]
+    },
+    "electrode_mode": {
+      "pipeline": [
+        { "name": "SpikeEncoder",     "type": "temporal receptive field", "output": "bool[nCenters × twindow]" },
+        { "name": "AttentionNeuron",   "type": "LIF + synaptic depression", "output": "bool (dn_spike)" },
+        { "name": "TemplateLayer",     "type": "60 LIF + STDP + WTA", "output": "bool[60] (l1_spikes)" },
+        { "name": "ControlDecoder",    "type": "rate / population / trigger", "output": "(control_value, confidence)" }
+      ]
+    }
+  },
+
+  "extension_points": {
+    "neuron_models":       ["LIF (implemented)", "AdEx", "Izhikevich"],
+    "learning_rules":      ["reward_stdp (binary)", "asymmetric_stdp (electrode)", "eprop", "surrogate_bptt"],
+    "encoding_schemes":    ["rate (binary)", "temporal_receptive_field (electrode)", "latency", "population"],
+    "control_strategies":  ["rate (implemented)", "population (implemented)", "trigger (implemented)"],
+    "classification":      "L2 ClassificationLayer (ANNet output layer) — planned, not yet implemented"
+  }
+}

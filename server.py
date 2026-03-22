@@ -3,20 +3,20 @@ server.py — asyncio event loop for the SNN agent.
 
 Supports three modes (set in config.py):
 
-  "binary"    — Original mode.  UDP binary integer input, R-STDP learning.
   "electrode" — ANNet-derived mode.  UDP raw electrode samples in,
                 UDP control signal out, temporal receptive field encoding,
                 attention neuron gating, L1 template STDP.
   "lsl"       — Lab Streaming Layer mode.  Receives data from an LSL stream
                 (e.g. Neuralynx .ncs via lsl_player.py).  Same pipeline as
                 electrode mode but input comes from LSL instead of UDP.
+  "synthetic" — SpikeInterface ground-truth mode.  Generates a synthetic
+                recording with known spike times for benchmarking.
 
-Services (both modes):
-  1. UDP  port <udp_port>           — binary mode input  OR
-     UDP  port <udp_electrode_port> — electrode mode input
-  2. WS   port <ws_port>           — streams spikes to browser; accepts reward
+Services:
+  1. UDP  port <udp_electrode_port> — electrode mode input
+  2. WS   port <ws_port>           — streams spikes to browser
   3. HTTP port <http_port>         — serves index.html
-  4. UDP  port <udp_control_port>  — electrode mode control signal output
+  4. UDP  port <udp_control_port>  — control signal output
 
 Run:
   python server.py
@@ -24,9 +24,13 @@ Run:
 
 import asyncio
 import json
+import os
+import signal
 import socket
 import struct
+import subprocess
 import threading
+import time
 import http.server
 from pathlib import Path
 
@@ -34,25 +38,37 @@ import numpy as np
 import websockets
 
 from config import CFG
-from snn import Network, TemplateLayer
-from encoder import SpikeEncoder, AttentionNeuron
+from snn import TemplateLayer
+from encoder import Preprocessor, SpikeEncoder, AttentionNeuron
 from decoder import ControlDecoder
 
 
 # ── Shared mutable state ──────────────────────────────────────────────────────
-net        = Network(CFG)      # binary mode network (always instantiated)
 ws_clients = set()             # active WebSocket connections
-reward     = [0.0]             # current reward; updated by browser over WebSocket
 pipeline   = {}                # live refs to pipeline objects (for WS control)
 
-UDP_MAGIC       = 0xABCD
-UDP_FMT         = "!HI"
-UDP_FRAME_SIZE  = struct.calcsize(UDP_FMT)
 BROADCAST_EVERY = CFG.get("broadcast_every", 5)
 
 # Electrode mode frame format: magic(uint16) + sample(float32)
+UDP_MAGIC       = 0xABCD
 ELEC_FMT        = "!Hf"
 ELEC_FRAME_SIZE = struct.calcsize(ELEC_FMT)
+
+
+# ── Pre-flight port cleanup ───────────────────────────────────────────────────
+def _free_port(port: int) -> None:
+    """Best-effort kill of any process holding *port* (macOS / Linux)."""
+    try:
+        out = subprocess.check_output(
+            ["lsof", "-ti", f":{port}"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+        for pid_str in out.splitlines():
+            pid = int(pid_str)
+            if pid != os.getpid():
+                os.kill(pid, signal.SIGKILL)
+        time.sleep(0.3)  # let the OS release the socket
+    except (subprocess.CalledProcessError, OSError, ValueError):
+        pass  # nothing on that port — fine
 
 
 # ── HTTP static file server ───────────────────────────────────────────────────
@@ -65,8 +81,13 @@ class _StaticHandler(http.server.SimpleHTTPRequestHandler):
         pass  # suppress per-request log lines
 
 
+class _ReusableHTTPServer(http.server.HTTPServer):
+    allow_reuse_address = True
+    allow_reuse_port = True
+
+
 def _run_http(port: int) -> None:
-    http.server.HTTPServer(("", port), _StaticHandler).serve_forever()
+    _ReusableHTTPServer(("", port), _StaticHandler).serve_forever()
 
 
 # ── UDP input receiver ────────────────────────────────────────────────────────
@@ -96,8 +117,6 @@ async def ws_handler(websocket) -> None:
         async for msg in websocket:
             try:
                 data = json.loads(msg)
-                if "reward" in data:
-                    reward[0] = max(-1.0, min(1.0, float(data["reward"])))
                 if "dn_threshold" in data:
                     _dn = pipeline.get("dn")
                     if _dn is not None:
@@ -118,31 +137,6 @@ async def _broadcast(msg: str) -> None:
         )
 
 
-# ── Simulation loop (binary mode — original) ──────────────────────────────────
-async def sim_loop_binary(queue: asyncio.Queue) -> None:
-    cfg        = CFG
-    dt         = cfg["dt"]
-    bw_in      = cfg["input_bit_width"]
-    current_in = 0
-
-    while True:
-        while not queue.empty():
-            current_in = queue.get_nowait()
-
-        in_spikes            = Network.encode(current_in, bw_in)
-        h_spikes, out_spikes = net.step(in_spikes)
-        net.stdp_update(in_spikes, reward=reward[0])
-
-        if net.t % BROADCAST_EVERY == 0:
-            await _broadcast(json.dumps({
-                "t":      net.t,
-                "spikes": np.where(h_spikes)[0].tolist(),
-                "out":    Network.decode(out_spikes),
-            }))
-
-        await asyncio.sleep(dt)
-
-
 # ── Simulation loop (electrode mode — ANNet-derived) ──────────────────────────
 async def sim_loop_electrode(queue: asyncio.Queue) -> None:
     """
@@ -153,7 +147,11 @@ async def sim_loop_electrode(queue: asyncio.Queue) -> None:
     cfg = CFG
 
     # Build pipeline components
-    encoder = SpikeEncoder(cfg)
+    preproc = Preprocessor(cfg)
+    # Override sampling rate for downstream components if decimating
+    enc_cfg = dict(cfg)
+    enc_cfg["sampling_rate_hz"] = preproc.effective_fs
+    encoder = SpikeEncoder(enc_cfg)
     # AttentionNeuron and TemplateLayer are created AFTER encoder calibration
     dn:      AttentionNeuron | None = None
     l1:      TemplateLayer   | None = None
@@ -166,8 +164,13 @@ async def sim_loop_electrode(queue: asyncio.Queue) -> None:
     step_count = 0
     last_control = 0.0
     last_confidence = 0.0
+    sample_buf   = []       # batched raw samples for browser waveform
+    dn_buf       = []       # per-sample DN fire flags (0/1)
+    l1_spike_set = set()    # union of L1 neuron IDs across batch
 
-    print("   ⏳ Calibrating encoder (collecting noise statistics)…")
+    dec_info = (f"  decimation {cfg['sampling_rate_hz']}→{preproc.effective_fs} Hz"
+                if preproc.do_decimate else "")
+    print(f"   ⏳ Calibrating encoder (collecting noise statistics)…{dec_info}")
 
     while True:
         # Drain queue — always use freshest sample
@@ -179,60 +182,72 @@ async def sim_loop_electrode(queue: asyncio.Queue) -> None:
             await asyncio.sleep(0.0001)  # 100 µs idle poll
             continue
 
-        step_count += 1
+        # ── Preprocess (bandpass + decimation) ────────────────────────────
+        processed = preproc.step(float(sample))
+        if not processed:
+            continue  # decimated away
 
-        # ── Encode ────────────────────────────────────────────────────────
-        afferents = encoder.step(float(sample))
+        for pp_sample in processed:
+            step_count += 1
+            sample_buf.append(round(pp_sample, 6))
 
-        if not encoder.is_calibrated:
-            # Still collecting noise statistics
-            if step_count % 2000 == 0:
-                print(f"   ⏳ Calibrating… {step_count}/{cfg['enc_noise_init_samples']}")
-            continue
+            # ── Encode ────────────────────────────────────────────────────
+            afferents = encoder.step(pp_sample)
 
-        # First step after calibration: build downstream components
-        if dn is None:
-            n_aff = encoder.n_afferents
-            dn      = AttentionNeuron(cfg, n_aff)
-            pipeline["dn"] = dn
-            if cfg.get("backend") == "torch":
-                from snn_torch import TorchTemplateLayer
-                l1 = TorchTemplateLayer(cfg, n_aff)
-            else:
+            if not encoder.is_calibrated:
+                dn_buf.append(0)
+                if step_count % BROADCAST_EVERY == 0 and sample_buf:
+                    await _broadcast(json.dumps({
+                        "t": step_count, "samples": list(sample_buf),
+                        "dn_flags": list(dn_buf), "spikes": [],
+                        "control": 0, "confidence": 0,
+                    }))
+                    sample_buf.clear(); dn_buf.clear()
+                if step_count % 2000 == 0:
+                    print(f"   ⏳ Calibrating… {step_count}/{enc_cfg['enc_noise_init_samples']}")
+                continue
+
+            # First step after calibration: build downstream components
+            if dn is None:
+                n_aff = encoder.n_afferents
+                dn      = AttentionNeuron(enc_cfg, n_aff)
+                pipeline["dn"] = dn
                 l1 = TemplateLayer(cfg, n_aff)
-            decoder = ControlDecoder(cfg, cfg["l1_n_neurons"])
-            print(f"   ✅ Encoder calibrated: {encoder.n_centers} centers × "
-                  f"{encoder.twindow} delays = {n_aff} afferents")
-            print(f"   ✅ Pipeline ready — processing samples")
+                decoder = ControlDecoder(enc_cfg, cfg["l1_n_neurons"])
+                print(f"   ✅ Encoder calibrated: {encoder.n_centers} centers × "
+                      f"{encoder.twindow} delays = {n_aff} afferents")
+                print(f"   ✅ Pipeline ready — processing at {preproc.effective_fs} Hz")
 
-        # ── Attention neuron ──────────────────────────────────────────────
-        dn_spike = dn.step(afferents)
+            # ── Attention neuron ──────────────────────────────────────────
+            dn_spike = dn.step(afferents)
+            dn_buf.append(int(dn_spike))
 
-        # ── Template layer (L1) ──────────────────────────────────────────
-        l1_spikes = l1.step(afferents, dn_spike)
+            # ── Template layer (L1) ──────────────────────────────────────
+            l1_spikes = l1.step(afferents, dn_spike)
+            for idx in np.flatnonzero(l1_spikes):
+                l1_spike_set.add(int(idx))
 
-        # ── Control decoder ──────────────────────────────────────────────
-        result = decoder.step(l1_spikes, dn_spike)
-        if result is not None:
-            ctrl_val, confidence = result
-            last_control    = ctrl_val
-            last_confidence = confidence
-            # Send control signal via UDP
-            ctrl_sock.sendto(
-                struct.pack("!ff", ctrl_val, confidence), ctrl_addr)
+            # ── Control decoder ──────────────────────────────────────────
+            result = decoder.step(l1_spikes, dn_spike)
+            if result is not None:
+                ctrl_val, confidence = result
+                last_control    = ctrl_val
+                last_confidence = confidence
+                ctrl_sock.sendto(
+                    struct.pack("!ff", ctrl_val, confidence), ctrl_addr)
 
-        # ── Broadcast to browser ─────────────────────────────────────────
-        if step_count % BROADCAST_EVERY == 0:
-            firing = np.where(l1_spikes)[0].tolist() if l1 is not None else []
-            await _broadcast(json.dumps({
-                "t":          step_count,
-                "spikes":     firing,
-                "dn":         int(dn_spike),
-                "control":    round(last_control, 4),
-                "confidence": round(last_confidence, 4),
-                "sample":     round(float(sample), 6),
-                "dn_th":      round(dn.threshold, 2) if dn else 0,
-            }))
+            # ── Broadcast to browser (batched) ───────────────────────────
+            if step_count % BROADCAST_EVERY == 0 and sample_buf:
+                await _broadcast(json.dumps({
+                    "t":          step_count,
+                    "samples":    list(sample_buf),
+                    "dn_flags":   list(dn_buf),
+                    "spikes":     sorted(l1_spike_set),
+                    "control":    round(last_control, 4),
+                    "confidence": round(last_confidence, 4),
+                    "dn_th":      round(dn.threshold, 2) if dn else 0,
+                }))
+                sample_buf.clear(); dn_buf.clear(); l1_spike_set.clear()
 
         # Yield to event loop periodically (every 100 samples ≈ 1.25 ms)
         if step_count % 100 == 0:
@@ -243,8 +258,8 @@ async def sim_loop_electrode(queue: asyncio.Queue) -> None:
 async def sim_loop_lsl() -> None:
     """
     Receives samples from an LSL stream (e.g. Neuralynx .ncs replayed by
-    lsl_player.py) and processes them through the same pipeline as electrode
-    mode:  sample → SpikeEncoder → AttentionNeuron → TemplateLayer → Decoder
+    lsl_player.py) and processes them through the pipeline:
+      sample → Preprocessor → SpikeEncoder → AttentionNeuron → TemplateLayer → Decoder
     """
     from mne_lsl.stream import StreamLSL     # lazy import — only needed in LSL mode
 
@@ -258,7 +273,6 @@ async def sim_loop_lsl() -> None:
 
     # ── Connect to LSL stream (blocks until found or timeout) ─────────
     stream = StreamLSL(bufsize=bufsize, name=stream_name)
-    # run connect in executor so we don't freeze the event loop
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(
         None,
@@ -274,14 +288,18 @@ async def sim_loop_lsl() -> None:
     else:
         ch_idx = 0
 
-    # Override sampling rate so encoder / decoder use the right time base
+    # Override sampling rate so preprocessor uses the right time base
     cfg["sampling_rate_hz"] = int(sfreq)
 
     print(f"   ✅ Connected: '{stream_name}'  |"
           f"  {sfreq:.0f} Hz  |  ch: {ch_names[ch_idx]}")
 
     # ── Build pipeline ────────────────────────────────────────────────
-    encoder = SpikeEncoder(cfg)
+    preproc = Preprocessor(cfg)
+    enc_cfg = dict(cfg)
+    enc_cfg["sampling_rate_hz"] = preproc.effective_fs
+    encoder = SpikeEncoder(enc_cfg)
+
     dn:      AttentionNeuron | None = None
     l1:      TemplateLayer   | None = None
     decoder: ControlDecoder  | None = None
@@ -292,8 +310,13 @@ async def sim_loop_lsl() -> None:
     step_count      = 0
     last_control    = 0.0
     last_confidence = 0.0
+    sample_buf      = []
+    dn_buf          = []
+    l1_spike_set    = set()
 
-    print("   ⏳ Calibrating encoder (collecting noise statistics)…")
+    dec_info = (f"  decimation {int(sfreq)}→{preproc.effective_fs} Hz"
+                if preproc.do_decimate else "")
+    print(f"   ⏳ Calibrating encoder (collecting noise statistics)…{dec_info}")
 
     while True:
         n_new = stream.n_new_samples
@@ -301,45 +324,203 @@ async def sim_loop_lsl() -> None:
             await asyncio.sleep(poll_sleep)
             continue
 
-        # Retrieve only the freshly-arrived samples
         data, _ts = stream.get_data(winsize=n_new / sfreq)
-        # data shape: (n_channels, n_samples)
 
         for i in range(data.shape[1]):
-            sample = float(data[ch_idx, i])
-            step_count += 1
+            raw_sample = float(data[ch_idx, i])
 
-            # ── Encode ────────────────────────────────────────────────
-            afferents = encoder.step(sample)
-
-            if not encoder.is_calibrated:
-                if step_count % 2000 == 0:
-                    print(f"   ⏳ Calibrating… "
-                          f"{step_count}/{cfg['enc_noise_init_samples']}")
+            # ── Preprocess (bandpass + decimation) ────────────────────
+            processed = preproc.step(raw_sample)
+            if not processed:
                 continue
 
-            # First step after calibration → build downstream
+            for pp_sample in processed:
+                step_count += 1
+                sample_buf.append(round(pp_sample, 6))
+
+                # ── Encode ────────────────────────────────────────────
+                afferents = encoder.step(pp_sample)
+
+                if not encoder.is_calibrated:
+                    dn_buf.append(0)
+                    if step_count % BROADCAST_EVERY == 0 and sample_buf:
+                        await _broadcast(json.dumps({
+                            "t": step_count, "samples": list(sample_buf),
+                            "dn_flags": list(dn_buf), "spikes": [],
+                            "control": 0, "confidence": 0,
+                        }))
+                        sample_buf.clear(); dn_buf.clear()
+                    if step_count % 2000 == 0:
+                        print(f"   ⏳ Calibrating… "
+                              f"{step_count}/{enc_cfg['enc_noise_init_samples']}")
+                    continue
+
+                # First step after calibration → build downstream
+                if dn is None:
+                    n_aff = encoder.n_afferents
+                    dn      = AttentionNeuron(enc_cfg, n_aff)
+                    pipeline["dn"] = dn
+                    l1 = TemplateLayer(cfg, n_aff)
+                    decoder = ControlDecoder(enc_cfg, cfg["l1_n_neurons"])
+                    print(f"   ✅ Encoder calibrated: {encoder.n_centers} centers × "
+                          f"{encoder.twindow} delays = {n_aff} afferents")
+                    print(f"   ✅ Pipeline ready — processing at "
+                          f"{preproc.effective_fs} Hz")
+
+                # ── Attention neuron ──────────────────────────────────
+                dn_spike = dn.step(afferents)
+                dn_buf.append(int(dn_spike))
+
+                # ── Template layer (L1) ──────────────────────────────
+                l1_spikes = l1.step(afferents, dn_spike)
+                for idx in np.flatnonzero(l1_spikes):
+                    l1_spike_set.add(int(idx))
+
+                # ── Control decoder ──────────────────────────────────
+                result = decoder.step(l1_spikes, dn_spike)
+                if result is not None:
+                    ctrl_val, confidence = result
+                    last_control    = ctrl_val
+                    last_confidence = confidence
+                    ctrl_sock.sendto(
+                        struct.pack("!ff", ctrl_val, confidence), ctrl_addr)
+
+                # ── Broadcast to browser (batched) ───────────────────
+                if step_count % BROADCAST_EVERY == 0 and sample_buf:
+                    await _broadcast(json.dumps({
+                        "t":          step_count,
+                        "samples":    list(sample_buf),
+                        "dn_flags":   list(dn_buf),
+                        "spikes":     sorted(l1_spike_set),
+                        "control":    round(last_control, 4),
+                        "confidence": round(last_confidence, 4),
+                        "dn_th":      round(dn.threshold, 2) if dn else 0,
+                    }))
+                    sample_buf.clear(); dn_buf.clear(); l1_spike_set.clear()
+
+        # Yield to event loop after processing each chunk
+        await asyncio.sleep(0)
+
+
+# ── Simulation loop (synthetic mode — SpikeInterface ground truth) ─────────────
+async def sim_loop_synthetic() -> None:
+    """
+    Generates a synthetic recording via spikeinterface with known ground-truth
+    spike trains, then processes it through the pipeline.  Useful for
+    development and benchmarking without hardware or NCS files.
+    """
+    import spikeinterface.full as si          # lazy — heavy dep
+
+    cfg = CFG
+
+    duration_s  = cfg.get("synth_duration_s", 20.0)
+    fs          = cfg.get("synth_fs", 30_000)
+    num_units   = cfg.get("synth_num_units", 2)
+    noise_level = cfg.get("synth_noise_level", 8.0)
+    seed        = cfg.get("synth_seed", 42)
+    pace_rt     = cfg.get("synth_realtime", True)
+
+    print(f"   🧪 Generating synthetic recording …")
+    print(f"      Duration : {duration_s} s  |  Fs : {fs} Hz")
+    print(f"      Units    : {num_units}  |  Noise : {noise_level}")
+
+    recording, sorting = si.generate_ground_truth_recording(
+        durations=[duration_s],
+        sampling_frequency=float(fs),
+        num_channels=1,
+        num_units=num_units,
+        seed=seed,
+    )
+
+    for uid in sorting.unit_ids:
+        train = sorting.get_unit_spike_train(unit_id=uid)
+        rate  = len(train) / duration_s
+        print(f"      Unit {uid}: {len(train)} spikes ({rate:.1f} Hz)")
+
+    # Override sampling rate for preprocessor
+    cfg["sampling_rate_hz"] = int(fs)
+
+    # ── Build pipeline ────────────────────────────────────────────────
+    preproc = Preprocessor(cfg)
+    enc_cfg = dict(cfg)
+    enc_cfg["sampling_rate_hz"] = preproc.effective_fs
+    encoder = SpikeEncoder(enc_cfg)
+
+    dn:      AttentionNeuron | None = None
+    l1:      TemplateLayer   | None = None
+    decoder: ControlDecoder  | None = None
+
+    ctrl_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    ctrl_addr = (cfg["control_target_host"], cfg["udp_control_port"])
+
+    step_count      = 0
+    last_control    = 0.0
+    last_confidence = 0.0
+    sample_buf      = []
+    dn_buf          = []
+    l1_spike_set    = set()
+
+    dec_info = (f"  decimation {fs}→{preproc.effective_fs} Hz"
+                if preproc.do_decimate else "")
+    print(f"   ⏳ Calibrating encoder …{dec_info}")
+
+    traces = recording.get_traces(segment_index=0)[:, 0]  # (n_samples,)
+    n_total = len(traces)
+    t0 = time.perf_counter()
+
+    for frame_idx in range(n_total):
+        raw_sample = float(traces[frame_idx])
+
+        processed = preproc.step(raw_sample)
+        if not processed:
+            continue
+
+        for pp_sample in processed:
+            step_count += 1
+            sample_buf.append(round(pp_sample, 6))
+
+            afferents = encoder.step(pp_sample)
+
+            if not encoder.is_calibrated:
+                dn_buf.append(0)
+                if step_count % BROADCAST_EVERY == 0 and sample_buf:
+                    await _broadcast(json.dumps({
+                        "t": step_count, "samples": list(sample_buf),
+                        "dn_flags": list(dn_buf), "spikes": [],
+                        "control": 0, "confidence": 0,
+                    }))
+                    sample_buf.clear(); dn_buf.clear()
+                if step_count % 2000 == 0:
+                    print(f"   ⏳ Calibrating… "
+                          f"{step_count}/{enc_cfg['enc_noise_init_samples']}")
+                # Real-time pacing (based on raw recording clock)
+                if pace_rt and frame_idx % 500 == 0:
+                    expected = frame_idx / fs
+                    elapsed  = time.perf_counter() - t0
+                    if expected > elapsed:
+                        await asyncio.sleep(expected - elapsed)
+                    else:
+                        await asyncio.sleep(0)
+                continue
+
             if dn is None:
                 n_aff = encoder.n_afferents
-                dn      = AttentionNeuron(cfg, n_aff)
+                dn      = AttentionNeuron(enc_cfg, n_aff)
                 pipeline["dn"] = dn
-                if cfg.get("backend") == "torch":
-                    from snn_torch import TorchTemplateLayer
-                    l1 = TorchTemplateLayer(cfg, n_aff)
-                else:
-                    l1 = TemplateLayer(cfg, n_aff)
-                decoder = ControlDecoder(cfg, cfg["l1_n_neurons"])
-                print(f"   ✅ Encoder calibrated: {encoder.n_centers} centers × "
+                l1 = TemplateLayer(cfg, n_aff)
+                decoder = ControlDecoder(enc_cfg, cfg["l1_n_neurons"])
+                print(f"   ✅ Encoder calibrated: {encoder.n_centers} centres × "
                       f"{encoder.twindow} delays = {n_aff} afferents")
-                print(f"   ✅ Pipeline ready — processing samples")
+                print(f"   ✅ Pipeline ready — processing at "
+                      f"{preproc.effective_fs} Hz")
 
-            # ── Attention neuron ──────────────────────────────────────
             dn_spike = dn.step(afferents)
+            dn_buf.append(int(dn_spike))
 
-            # ── Template layer (L1) ──────────────────────────────────
             l1_spikes = l1.step(afferents, dn_spike)
+            for idx in np.flatnonzero(l1_spikes):
+                l1_spike_set.add(int(idx))
 
-            # ── Control decoder ──────────────────────────────────────
             result = decoder.step(l1_spikes, dn_spike)
             if result is not None:
                 ctrl_val, confidence = result
@@ -348,30 +529,48 @@ async def sim_loop_lsl() -> None:
                 ctrl_sock.sendto(
                     struct.pack("!ff", ctrl_val, confidence), ctrl_addr)
 
-            # ── Broadcast to browser ─────────────────────────────────
-            if step_count % BROADCAST_EVERY == 0:
-                firing = (
-                    np.where(l1_spikes)[0].tolist() if l1 is not None else []
-                )
+            if step_count % BROADCAST_EVERY == 0 and sample_buf:
                 await _broadcast(json.dumps({
                     "t":          step_count,
-                    "spikes":     firing,
-                    "dn":         int(dn_spike),
+                    "samples":    list(sample_buf),
+                    "dn_flags":   list(dn_buf),
+                    "spikes":     sorted(l1_spike_set),
                     "control":    round(last_control, 4),
                     "confidence": round(last_confidence, 4),
-                    "sample":     round(sample, 6),
                     "dn_th":      round(dn.threshold, 2) if dn else 0,
                 }))
+                sample_buf.clear(); dn_buf.clear(); l1_spike_set.clear()
 
-        # Yield to event loop after processing each chunk
-        await asyncio.sleep(0)
+        # Pace to recording real-time
+        if pace_rt and frame_idx % 500 == 0:
+            expected = frame_idx / fs
+            elapsed  = time.perf_counter() - t0
+            if expected > elapsed:
+                await asyncio.sleep(expected - elapsed)
+            else:
+                await asyncio.sleep(0)
+        elif frame_idx % 500 == 0:
+            await asyncio.sleep(0)  # yield even in fast mode
+
+    elapsed_total = time.perf_counter() - t0
+    print(f"\n   🏁 Synthetic recording finished: {step_count} processed samples "
+          f"in {elapsed_total:.1f}s")
+    print(f"      Ground-truth sorting saved in-memory; "
+          f"use ground_truth_generator.py for scoring.")
+    # Keep WS alive so the browser can scroll back
+    while True:
+        await asyncio.sleep(1)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 async def main() -> None:
     cfg   = CFG
-    mode  = cfg.get("mode", "binary")
+    mode  = cfg.get("mode", "electrode")
     queue = asyncio.Queue(maxsize=4096)
+
+    # 0. Free stale ports before binding
+    _free_port(cfg["ws_port"])
+    _free_port(cfg["http_port"])
 
     # 1. HTTP static server — background daemon thread
     threading.Thread(
@@ -380,12 +579,29 @@ async def main() -> None:
 
     # 2. WebSocket server
     async def run_ws() -> None:
-        async with websockets.serve(ws_handler, "0.0.0.0", cfg["ws_port"]):
+        async with websockets.serve(
+            ws_handler, "0.0.0.0", cfg["ws_port"],
+            reuse_address=True,
+            reuse_port=True,
+        ):
             await asyncio.Future()
 
     loop = asyncio.get_running_loop()
 
-    if mode == "lsl":
+    if mode == "synthetic":
+        # ── Synthetic (SpikeInterface) mode ───────────────────────────────
+        n_l1 = cfg["l1_n_neurons"]
+        dur  = cfg.get("synth_duration_s", 20.0)
+        print(f"\n⚡ SNN Agent  [synthetic mode]")
+        print(f"   L1 neurons   →  {n_l1}")
+        print(f"   Strategy     →  {cfg['ctrl_strategy']}")
+        print(f"   Duration     →  {dur} s")
+        print(f"   Browser      →  http://localhost:{cfg['http_port']}")
+        print(f"   WebSocket    →  ws://localhost:{cfg['ws_port']}\n")
+
+        await asyncio.gather(sim_loop_synthetic(), run_ws())
+
+    elif mode == "lsl":
         # ── LSL mode ──────────────────────────────────────────────────────
         lsl_name = cfg.get("lsl_stream_name", "NCS-Replay")
         n_l1 = cfg["l1_n_neurons"]
@@ -400,7 +616,7 @@ async def main() -> None:
 
         await asyncio.gather(sim_loop_lsl(), run_ws())
 
-    elif mode == "electrode":
+    else:
         # ── Electrode mode ────────────────────────────────────────────────
         await loop.create_datagram_endpoint(
             lambda: UDPReceiver(queue, ELEC_FMT, ELEC_FRAME_SIZE),
@@ -419,24 +635,6 @@ async def main() -> None:
         print(f"   WebSocket    →  ws://localhost:{cfg['ws_port']}\n")
 
         await asyncio.gather(sim_loop_electrode(queue), run_ws())
-
-    else:
-        # ── Binary mode (original) ───────────────────────────────────────
-        await loop.create_datagram_endpoint(
-            lambda: UDPReceiver(queue, UDP_FMT, UDP_FRAME_SIZE),
-            local_addr=("0.0.0.0", cfg["udp_port"]),
-        )
-
-        n_in  = cfg["input_bit_width"]
-        n_h   = cfg["n_hidden"]
-        n_out = cfg["output_bit_width"]
-        print(f"\n⚡ SNN Agent  [{n_in} → {n_h} → {n_out} neurons]")
-        print(f"   Browser    →  http://localhost:{cfg['http_port']}")
-        print(f"   UDP input  →  port {cfg['udp_port']}   (run: python test_sender.py)")
-        print(f"   WebSocket  →  ws://localhost:{cfg['ws_port']}")
-        print(f"   Reward     →  use ✅/❌ buttons in browser, or send {{\"reward\": ±1}} via WS\n")
-
-        await asyncio.gather(sim_loop_binary(queue), run_ws())
 
 
 if __name__ == "__main__":

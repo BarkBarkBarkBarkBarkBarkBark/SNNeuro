@@ -1,0 +1,66 @@
+{
+    "specification": "probeinterface",
+    "version": "0.3.2",
+    "probes": [
+        {
+            "ndim": 2,
+            "si_units": "um",
+            "annotations": {},
+            "contact_annotations": {},
+            "contact_positions": [
+                [
+                    20.0,
+                    0.0
+                ]
+            ],
+            "contact_plane_axes": [
+                [
+                    [
+                        1.0,
+                        0.0
+                    ],
+                    [
+                        0.0,
+                        1.0
+                    ]
+                ]
+            ],
+            "contact_shapes": [
+                "circle"
+            ],
+            "contact_shape_params": [
+                {
+                    "radius": 6.0
+                }
+            ],
+            "probe_planar_contour": [
+                [
+                    -5.0,
+                    25.0
+                ],
+                [
+                    -5.0,
+                    -25.0
+                ],
+                [
+                    20.0,
+                    -125.0
+                ],
+                [
+                    45.0,
+                    -25.0
+                ],
+                [
+                    45.0,
+                    25.0
+                ]
+            ],
+            "device_channel_indices": [
+                0
+            ],
+            "contact_ids": [
+                "0"
+            ]
+        }
+    ]
+}

@@ -1,8 +1,12 @@
 """
-encoder.py — Temporal receptive field encoder + attention neuron.
+encoder.py — Preprocessing, temporal receptive field encoder, and attention neuron.
 
 Derived from MB2018 ANNet (MATLAB/C MEX).
 See annet_architecture.yaml §1 (encoding) and §1 (attention_neuron).
+
+Preprocessor
+    Optional causal IIR bandpass filter (300–6 000 Hz) followed by integer
+    decimation.  Runs sample-by-sample, maintaining filter state across calls.
 
 SpikeEncoder
     Converts a raw electrode sample (float) into a binary afferent vector.
@@ -16,6 +20,73 @@ AttentionNeuron
 """
 
 import numpy as np
+from scipy.signal import butter, sosfilt
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Preprocessor — causal bandpass + decimation
+# ─────────────────────────────────────────────────────────────────────────────
+class Preprocessor:
+    """
+    Optional front-end: bandpass filter then decimate.
+
+    Bandpass uses second-order sections (SOS) applied sample-by-sample via
+    sosfilt with carried state, so it is causal and streaming-safe.
+
+    Decimation simply keeps every N-th sample (after the anti-alias bandpass
+    has already removed energy above Nyquist/N).
+
+    Usage:
+        pp = Preprocessor(cfg)
+        for raw_sample in stream:
+            for sample in pp.step(raw_sample):
+                encoder.step(sample)
+    """
+
+    def __init__(self, cfg: dict):
+        fs = cfg["sampling_rate_hz"]
+
+        # ── Bandpass ──────────────────────────────────────────────────────
+        self.do_bandpass = cfg.get("enable_bandpass", False)
+        if self.do_bandpass:
+            lo = cfg["bandpass_lo_hz"]
+            hi = cfg["bandpass_hi_hz"]
+            order = cfg.get("bandpass_order", 2)
+            self._sos = butter(order, [lo, hi], btype="band",
+                               fs=fs, output="sos")
+            # sosfilt state: (n_sections, 2)
+            self._zi = np.zeros((self._sos.shape[0], 2), dtype=np.float64)
+
+        # ── Decimation ────────────────────────────────────────────────────
+        self.do_decimate = cfg.get("enable_decimation", False)
+        self.dec_factor  = cfg.get("decimation_factor", 1)
+        self._dec_count  = 0
+
+        # Effective sample rate after decimation (informational)
+        self.effective_fs = fs // self.dec_factor if self.do_decimate else fs
+
+    def step(self, sample: float) -> list[float]:
+        """
+        Ingest one raw sample.  Returns a list of output samples:
+          - [] if the sample was decimated away
+          - [filtered_sample] otherwise
+        """
+        x = sample
+
+        # Bandpass (sample-by-sample via sosfilt with state)
+        if self.do_bandpass:
+            out, self._zi = sosfilt(self._sos, np.array([x]),
+                                    zi=self._zi)
+            x = float(out[0])
+
+        # Decimation
+        if self.do_decimate:
+            self._dec_count += 1
+            if self._dec_count < self.dec_factor:
+                return []
+            self._dec_count = 0
+
+        return [x]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -78,7 +149,9 @@ class SpikeEncoder:
                 self._sig_max = sample
             if self._sample_count >= self.init_samples:
                 self._calibrate()
-            return np.zeros(0, dtype=bool)
+                # fall through to encode this first sample
+            else:
+                return np.zeros(0, dtype=bool)
 
         # Update running noise estimate (exponential moving average of |x|)
         self._noise_est += self.ema_alpha * (abs(sample) - self._noise_est)
@@ -202,7 +275,7 @@ class AttentionNeuron:
         # Fire?
         fired = self.v >= self.threshold
         if fired:
-            self.v += self.reset_potential  # soft reset (additive)
+            self.v = self.reset_potential   # soft reset (V set to sub-threshold)
             self.n_spikes += 1
 
         return bool(fired)

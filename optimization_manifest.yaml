@@ -1,0 +1,92 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  optimization_manifest.yaml — Hyperparameter search space for the SNN agent
+#
+#  Read by optimize.py to drive an Optuna study.
+#  Each parameter maps to a key in config.py's CFG dict.
+# ─────────────────────────────────────────────────────────────────────────────
+
+study:
+  name: "snn-spike-sorting"
+  direction: maximize          # maximize accuracy
+  n_trials: 80                 # total evaluation budget
+  n_jobs: 1                    # sequential (GIL prevents true thread parallelism)
+  timeout_s: null              # optional wall-clock cap (seconds)
+  pruner:
+    type: none                 # "median" or "none" (each trial is a single score)
+  sampler:
+    type: tpe                  # Tree-structured Parzen Estimator
+
+# ── Objective metric ─────────────────────────────────────────────────────────
+objective:
+  metric: accuracy             # column name from spikeinterface perf DataFrame
+  aggregation: mean            # mean across ground-truth units
+
+# ── Synthetic recording (single, cached) ─────────────────────────────────────
+recording:
+  duration_s: 20.0
+  fs: 30000
+  num_units: 2
+  firing_rates: [6.0, 10.0]
+  noise_level: 8.0
+  seed: 42
+
+# ── Search space ─────────────────────────────────────────────────────────────
+#  8 curated high-impact parameters.
+#  Types:  float  — suggest_float (uniform)
+#          log    — suggest_float (log=True)
+#          int    — suggest_int
+#
+#  Ranges informed by diagnostics: L1 threshold is derived from
+#  (l1_dn_weight + enc_overlap × 7) × (1−exp(−step/τ)) / (1−exp(−1/τ))
+#  and the membrane must actually reach it (~65-120 current per step,
+#  β≈0.61 decay). Small step_size + high dn_weight → reachable threshold.
+#
+parameters:
+  dn_threshold_factor:
+    type: log
+    low:  0.15
+    high: 0.60
+    description: "DN threshold = factor × overlap × window / (1 − e^(−1/τ))"
+
+  l1_dn_weight:
+    type: float
+    low:  40.0
+    high: 120.0
+    description: "Excitatory boost from DN spike to all L1 neurons (must help reach threshold)"
+
+  l1_stdp_ltp:
+    type: log
+    low:  0.001
+    high: 0.02
+    description: "Long-term potentiation amplitude"
+
+  l1_stdp_ltd:
+    type: float
+    low:  -0.012
+    high: -0.0005
+    description: "Long-term depression amplitude (negative)"
+
+  enc_overlap:
+    type: int
+    low:  4
+    high: 14
+    description: "Amplitude bin overlap factor (lower = fewer afferents = lower threshold)"
+
+  enc_dvm_factor:
+    type: float
+    low:  1.0
+    high: 3.0
+    description: "Noise scale factor for RF half-width (dvm = factor × σ)"
+
+  enc_step_size:
+    type: int
+    low:  2
+    high: 4
+    description: "Temporal subsampling stride (lower = lower L1 threshold via formula)"
+
+  l1_n_neurons:
+    type: int
+    low:  20
+    high: 120
+    step: 10
+    description: "Number of L1 template neurons"

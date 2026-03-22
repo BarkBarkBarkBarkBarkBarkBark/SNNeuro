@@ -107,5 +107,26 @@
     "encoding_schemes":    ["rate (binary)", "temporal_receptive_field (electrode)", "latency", "population"],
     "control_strategies":  ["rate (implemented)", "population (implemented)", "trigger (implemented)"],
     "classification":      "L2 ClassificationLayer (ANNet output layer) — planned, not yet implemented"
+  },
+
+  "optimization": {
+    "description": "Automated hyperparameter search using Optuna TPE sampler against SpikeInterface ground-truth recordings.",
+    "manifest":    "optimization_manifest.yaml",
+    "evaluator":   "evaluate.py",
+    "driver":      "optimize.py",
+    "outputs": {
+      "best_config":  "best_config.json",
+      "trial_history": "trials.csv",
+      "study_db":     "snn-spike-sorting.db"
+    },
+    "search_space_parameters": [
+      "dn_threshold_factor", "l1_dn_weight", "l1_stdp_ltp", "l1_stdp_ltd",
+      "enc_overlap", "enc_dvm_factor", "enc_step_size", "l1_n_neurons"
+    ],
+    "objective": "maximize mean accuracy across ground-truth units",
+    "cli": {
+      "evaluate": "./run.sh evaluate '{\"l1_n_neurons\": 40}'",
+      "optimize": "./run.sh optimize --n-trials 80 --n-jobs 4"
+    }
   }
 }

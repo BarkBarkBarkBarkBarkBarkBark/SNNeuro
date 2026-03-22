@@ -1,0 +1,58 @@
+{
+    "class": "spikeinterface.core.binaryfolder.BinaryFolderRecording",
+    "module": "spikeinterface",
+    "version": "0.103.2",
+    "kwargs": {
+        "folder_path": "."
+    },
+    "annotations": {
+        "is_filtered": true,
+        "probe_0_planar_contour": [
+            [
+                -5.0,
+                25.0
+            ],
+            [
+                -5.0,
+                -25.0
+            ],
+            [
+                20.0,
+                -125.0
+            ],
+            [
+                45.0,
+                -25.0
+            ],
+            [
+                45.0,
+                25.0
+            ]
+        ],
+        "probes_info": [
+            {}
+        ],
+        "name": "GroundTruthRecording"
+    },
+    "properties": {
+        "group": [
+            0
+        ],
+        "location": [
+            [
+                20.0,
+                0.0
+            ]
+        ],
+        "gain_to_uV": [
+            1.0
+        ],
+        "offset_to_uV": [
+            0.0
+        ],
+        "gain_to_physical_unit": null,
+        "offset_to_physical_unit": null,
+        "physical_unit": null
+    },
+    "relative_paths": true
+}

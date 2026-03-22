@@ -1,0 +1,43 @@
+{
+    "class": "spikeinterface.core.binaryrecordingextractor.BinaryRecordingExtractor",
+    "module": "spikeinterface",
+    "version": "0.103.2",
+    "kwargs": {
+        "file_paths": [
+            "traces_cached_seg0.raw"
+        ],
+        "sampling_frequency": 30000.0,
+        "t_starts": null,
+        "num_channels": 1,
+        "dtype": "<f4",
+        "channel_ids": [
+            "0"
+        ],
+        "time_axis": 0,
+        "file_offset": 0,
+        "gain_to_uV": [
+            1.0
+        ],
+        "offset_to_uV": [
+            0.0
+        ],
+        "is_filtered": true
+    },
+    "annotations": {
+        "is_filtered": true
+    },
+    "properties": {
+        "group": null,
+        "location": null,
+        "gain_to_uV": [
+            1.0
+        ],
+        "offset_to_uV": [
+            0.0
+        ],
+        "gain_to_physical_unit": null,
+        "offset_to_physical_unit": null,
+        "physical_unit": null
+    },
+    "relative_paths": true
+}

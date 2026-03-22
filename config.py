@@ -9,6 +9,7 @@ CFG = {
     # "electrode" : real-time neural signal processing (ANNet-derived)
     # "lsl"       : Lab Streaming Layer input (lsl_player.py → mne-lsl)
     "mode": "lsl",
+    "backend": "torch",           # "numpy" or "torch" (snnTorch L1)
 
     # ── Network topology (binary mode) ────────────────────────────────────────
     "input_bit_width":  16,
@@ -49,7 +50,7 @@ CFG = {
 
     # ── Attention neuron (DN) ────────────────────────────────────────────────
     "dn_tm_samples":             2,       # membrane time constant (samples)
-    "dn_threshold_factor":       0.4252,  # threshold = factor × overlap × window × ...
+    "dn_threshold_factor":       0.25,    # threshold = factor × overlap × window × ...
     "dn_reset_potential_factor": 0.15,    # soft reset = factor × (e^(1/tm)-1) × threshold
     "dn_depression_tau":         400,     # pRel recovery (samples)
     "dn_depression_frac":        0.01613, # pRel depletion per spike (~1.6%)

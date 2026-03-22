@@ -75,6 +75,18 @@ button:active { background: #00cc33; }
   font-size: 0.65rem;
   color: #282828;
 }
+
+#threshold-ctrl {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+#dn_th_slider {
+  width: 200px;
+  accent-color: #ff6600;
+}
 </style>
 </head>
 <body>
@@ -104,6 +116,12 @@ button:active { background: #00cc33; }
   <span>L1 spikes/s = <span class="stat-val" id="s_l1hz">—</span></span>
   <span>control = <span class="stat-ctrl" id="s_ctrl">—</span></span>
   <span>confidence = <span class="stat-ctrl" id="s_conf">—</span></span>
+</div>
+
+<div id="threshold-ctrl">
+  <span class="panel-label" style="margin:0">DN THRESHOLD</span>
+  <input type="range" id="dn_th_slider" min="10" max="300" step="1" value="100" disabled>
+  <span class="stat-dn" id="dn_th_val">—</span>
 </div>
 
 <div id="ctrl">
@@ -263,6 +281,18 @@ function updateStats(t, spikes, dn, ctrl, conf, sample) {
   }
 }
 
+// ── DN Threshold slider ──────────────────────────────────────────────────────
+const thSlider = document.getElementById('dn_th_slider');
+const thVal    = document.getElementById('dn_th_val');
+let thInit = false;
+
+thSlider.addEventListener('input', () => {
+  const v = parseFloat(thSlider.value);
+  thVal.textContent = v.toFixed(0);
+  if (ws && ws.readyState === WebSocket.OPEN)
+    ws.send(JSON.stringify({ dn_threshold: v }));
+});
+
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 let ws = null;
 function connect() {
@@ -292,6 +322,13 @@ function connect() {
     hasNew         = true;
 
     updateStats(msg.t, spikes, dn, ctrl, conf, sample);
+
+    if (msg.dn_th !== undefined && !thInit) {
+      thSlider.value = msg.dn_th;
+      thSlider.disabled = false;
+      thVal.textContent = msg.dn_th.toFixed(0);
+      thInit = true;
+    }
   };
 }
 connect();

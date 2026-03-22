@@ -1,0 +1,298 @@
+project:
+  name: realtime_spike_event_engine
+  version: "0.1"
+  purpose: >
+    Detect candidate extracellular action potentials in a streaming signal,
+    extract a compact discriminative feature vector, and assign each event
+    to a source/state for downstream closed-loop control.
+  operating_modes:
+    - detection_only
+    - detection_plus_classification
+    - detection_plus_sorting
+    - control_optimized
+
+design_principles:
+  - favor low-latency time-domain features first
+  - use adaptive thresholds based on robust noise estimates
+  - align waveforms before feature extraction
+  - minimize redundant features
+  - treat drift and nonstationarity as state-tracking problems
+  - separate fast path from slow adaptation path
+
+signal_assumptions:
+  input_type: extracellular_voltage
+  channels: 1
+  sample_rate_hz: 30000
+  polarity:
+    primary: negative_peak
+    allow_biphasic: true
+  typical_event_window_ms:
+    pre_peak: 0.5
+    post_peak: 1.0
+
+pipeline:
+  preprocess:
+    steps:
+      - name: bandpass_filter
+        enabled: true
+        params:
+          highpass_hz: 300
+          lowpass_hz: 6000
+          causal_for_realtime: true
+      - name: notch_filter
+        enabled: optional
+        params:
+          line_noise_hz: [60, 120, 180]
+      - name: robust_noise_estimator
+        enabled: true
+        method: mad
+      - name: whitening_or_reference
+        enabled: optional
+
+  candidate_detection:
+    method: adaptive_threshold_crossing
+    params:
+      threshold_source: robust_noise_estimator
+      threshold_multiplier: 4.5
+      polarity: negative_or_absolute
+      refractory_guard_ms: 0.6
+      hysteresis: optional
+    outputs:
+      - event_start_index
+      - coarse_peak_index
+      - threshold_value
+      - local_noise_estimate
+
+  waveform_extraction:
+    method: peak_centered_snippet
+    params:
+      pre_peak_ms: 0.5
+      post_peak_ms: 1.0
+      alignment:
+        enabled: true
+        method: local_extremum_plus_subsample_interpolation
+
+  features:
+    essential:
+      amplitude_shape:
+        - min_value_uv
+        - max_value_uv
+        - peak_to_trough_uv
+        - abs_peak_uv
+      timing_shape:
+        - trough_to_peak_samples
+        - half_width_samples
+        - repolarization_width_samples
+        - time_to_return_baseline_samples
+      slope_curvature:
+        - max_negative_slope
+        - max_positive_slope
+        - slope_ratio_pre_post
+        - second_derivative_at_peak
+      energy_area:
+        - rms_energy
+        - l1_area
+        - l2_energy
+        - signed_area
+      local_context:
+        - baseline_mean_pre_event
+        - baseline_std_pre_event
+        - post_event_residual_energy
+
+    multiscale_optional:
+      moving_window_features:
+        window_sizes_samples: [3, 6, 12, 24]
+        include:
+          - moving_average
+          - moving_integral
+          - moving_rms
+          - moving_abs_sum
+      derivative_scales:
+        lags_samples: [1, 2, 4]
+        include:
+          - first_difference
+          - second_difference
+
+    reduced_representation:
+      enabled: true
+      methods:
+        - name: pca
+          keep_components: 3
+        - name: wavelet
+          enabled: optional
+          family: haar_or_db4
+          keep_coefficients: 4
+
+    discouraged:
+      - full_fft_of_each_short_snippet_as_primary_feature
+      - too_many_raw_averages_and_integrals_without_normalization
+      - large_feature_banks_without ablation_testing
+      - heavy online models in the fast path
+
+  classification:
+    fast_path:
+      purpose: low_latency_event_label
+      methods:
+        - template_matching
+        - nearest_centroid
+        - linear_classifier
+      output_labels:
+        - noise
+        - artifact
+        - unit_a
+        - unit_b
+        - unknown
+    slow_path:
+      purpose: adapt_templates_or_cluster_state
+      methods:
+        - online_kmeans
+        - gaussian_mixture_optional
+        - kalman_tracking_for_template_drift
+      update_rate_hz: 1_to_20
+
+  overlap_handling:
+    enabled: true
+    strategy:
+      - detect_possible_overlap_when_width_or_residual_is_abnormal
+      - try_template_subtraction_or_deconfusion
+      - otherwise_mark_as_ambiguous
+
+  adaptation:
+    noise_tracking:
+      enabled: true
+      method: exponential_or_kalman
+      update_on_non_event_samples_only: true
+    template_tracking:
+      enabled: true
+      method: kalman_or_exponential_centroid_update
+    drift_detection:
+      enabled: true
+      triggers:
+        - centroid_shift
+        - feature_distribution_shift
+        - refractory_violation_increase
+
+outputs:
+  per_event:
+    - timestamp_samples
+    - timestamp_seconds
+    - channel_id
+    - feature_vector
+    - label
+    - confidence
+    - overlap_flag
+    - noise_estimate
+  streaming_metrics:
+    - event_rate_hz
+    - label_histogram
+    - refractory_violation_rate
+    - feature_drift_score
+    - dropped_event_count
+
+control_hooks:
+  enabled: true
+  control_policy_inputs:
+    - label
+    - confidence
+    - event_rate_hz
+    - rolling_state_vector
+  examples:
+    - trigger_if_unit_a_rate_exceeds_threshold
+    - inhibit_if_artifact_probability_high
+    - modulate_output_by_population_state
+
+ablation_plan:
+  goal: identify minimal feature set with best latency_accuracy tradeoff
+  stages:
+    - baseline:
+        features:
+          - abs_peak_uv
+          - trough_to_peak_samples
+          - rms_energy
+          - max_negative_slope
+          - pca_1
+          - pca_2
+          - pca_3
+    - add_multiscale:
+        features:
+          - moving_rms_6
+          - moving_rms_12
+          - moving_integral_6
+    - add_wavelets:
+        features:
+          - wavelet_1
+          - wavelet_2
+          - wavelet_3
+          - wavelet_4
+    - add_adaptation:
+        modules:
+          - noise_tracking
+          - template_tracking
+
+implementation_notes:
+  fast_path_budget:
+    target_latency_ms: 1_to_5
+  preferred_data_flow:
+    - stream_samples_into_ring_buffer
+    - detect_threshold_crossing
+    - extract_aligned_snippet
+    - compute_compact_features
+    - classify
+    - emit_control_signal
+  buffer_design:
+    ring_buffer: true
+    event_queue: true
+    nonblocking_output: true
+
+recommended_starting_feature_set:
+  - min_value_uv
+  - peak_to_trough_uv
+  - trough_to_peak_samples
+  - half_width_samples
+  - max_negative_slope
+  - max_positive_slope
+  - rms_energy
+  - pca_1
+  - pca_2
+  - pca_3
+
+feature_mapping_from_user_ideas:
+  keep:
+    - amplitude
+    - integral
+    - derivative
+    - second_derivative
+    - multiscale_windows
+    - kalman_filter
+  refine:
+    average_amplitude:
+      replace_with:
+        - moving_average
+        - moving_rms
+        - baseline_corrected_area
+    fft:
+      replace_with:
+        - wavelet_coefficients
+        - pca_scores
+        - direct_waveform_shape_features
+    kalman_filter:
+      use_for:
+        - noise_tracking
+        - template_drift
+        - uncertainty_estimation
+      not_for:
+        - primary_fast_event_detection
+
+success_criteria:
+  detection:
+    - low_false_positive_rate
+    - low_missed_spike_rate
+  classification:
+    - stable_labels_under_noise
+    - stable_labels_under_small_drift
+  realtime:
+    - end_to_end_latency_below_target
+    - no_buffer_overrun
+  control:
+    - output_stability
+    - task_relevant_information_retained

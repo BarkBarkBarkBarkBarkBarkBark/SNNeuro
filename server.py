@@ -43,6 +43,7 @@ from decoder import ControlDecoder
 net        = Network(CFG)      # binary mode network (always instantiated)
 ws_clients = set()             # active WebSocket connections
 reward     = [0.0]             # current reward; updated by browser over WebSocket
+pipeline   = {}                # live refs to pipeline objects (for WS control)
 
 UDP_MAGIC       = 0xABCD
 UDP_FMT         = "!HI"
@@ -97,6 +98,10 @@ async def ws_handler(websocket) -> None:
                 data = json.loads(msg)
                 if "reward" in data:
                     reward[0] = max(-1.0, min(1.0, float(data["reward"])))
+                if "dn_threshold" in data:
+                    _dn = pipeline.get("dn")
+                    if _dn is not None:
+                        _dn.threshold = float(data["dn_threshold"])
             except (json.JSONDecodeError, ValueError, KeyError):
                 pass
     except Exception:
@@ -189,7 +194,12 @@ async def sim_loop_electrode(queue: asyncio.Queue) -> None:
         if dn is None:
             n_aff = encoder.n_afferents
             dn      = AttentionNeuron(cfg, n_aff)
-            l1      = TemplateLayer(cfg, n_aff)
+            pipeline["dn"] = dn
+            if cfg.get("backend") == "torch":
+                from snn_torch import TorchTemplateLayer
+                l1 = TorchTemplateLayer(cfg, n_aff)
+            else:
+                l1 = TemplateLayer(cfg, n_aff)
             decoder = ControlDecoder(cfg, cfg["l1_n_neurons"])
             print(f"   ✅ Encoder calibrated: {encoder.n_centers} centers × "
                   f"{encoder.twindow} delays = {n_aff} afferents")
@@ -221,6 +231,7 @@ async def sim_loop_electrode(queue: asyncio.Queue) -> None:
                 "control":    round(last_control, 4),
                 "confidence": round(last_confidence, 4),
                 "sample":     round(float(sample), 6),
+                "dn_th":      round(dn.threshold, 2) if dn else 0,
             }))
 
         # Yield to event loop periodically (every 100 samples ≈ 1.25 ms)
@@ -311,7 +322,12 @@ async def sim_loop_lsl() -> None:
             if dn is None:
                 n_aff = encoder.n_afferents
                 dn      = AttentionNeuron(cfg, n_aff)
-                l1      = TemplateLayer(cfg, n_aff)
+                pipeline["dn"] = dn
+                if cfg.get("backend") == "torch":
+                    from snn_torch import TorchTemplateLayer
+                    l1 = TorchTemplateLayer(cfg, n_aff)
+                else:
+                    l1 = TemplateLayer(cfg, n_aff)
                 decoder = ControlDecoder(cfg, cfg["l1_n_neurons"])
                 print(f"   ✅ Encoder calibrated: {encoder.n_centers} centers × "
                       f"{encoder.twindow} delays = {n_aff} afferents")
@@ -344,6 +360,7 @@ async def sim_loop_lsl() -> None:
                     "control":    round(last_control, 4),
                     "confidence": round(last_confidence, 4),
                     "sample":     round(sample, 6),
+                    "dn_th":      round(dn.threshold, 2) if dn else 0,
                 }))
 
         # Yield to event loop after processing each chunk

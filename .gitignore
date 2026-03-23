@@ -1,11 +1,31 @@
-Spiking-Neural-Networks-Tutorials
-MB2018 - ANNet
-__pycache__
-.venv
-raw_data/*
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
 
-# Optimization outputs
+# Virtual environments
+.venv/
+venv/
+
+# uv
+.python-version
+
+# IDE
+.vscode/settings.json
+.idea/
+
+# Data / cache
 .cache/
-*.db
-best_config.json
-trials.csv
+data/
+
+# OS
+.DS_Store
+
+# Reference materials (large, not project code)
+Spiking-Neural-Networks-Tutorials/
+
+# Legacy root-level files (replaced by src/snn_agent/)
+# Keep these listed until the old files are fully removed.

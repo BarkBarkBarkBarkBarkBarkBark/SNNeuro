@@ -1,0 +1,49 @@
+[project]
+name = "snn-agent"
+version = "0.1.0"
+description = "Streaming spiking neural network for real-time spike sorting of intracranial EEG single-unit recordings"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Marco" }]
+keywords = ["snn", "spike-sorting", "bci", "eeg", "intracranial", "spiking-neural-network"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Programming Language :: Python :: 3",
+]
+
+dependencies = [
+    "numpy>=1.24,<2",
+    "scipy>=1.11",
+    "torch>=2.0",
+    "snntorch>=0.7",
+    "websockets>=10",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+lsl = ["mne>=1.6", "mne-lsl>=1.4"]
+eval = ["spikeinterface>=0.101", "optuna>=3.5"]
+all = ["snn-agent[lsl,eval]"]
+dev = ["snn-agent[all]", "pytest>=7", "ruff>=0.4"]
+
+[project.scripts]
+snn-serve = "snn_agent.server.app:main"
+snn-evaluate = "snn_agent.eval.evaluate:main"
+snn-optimize = "snn_agent.eval.optimize:main"
+snn-lsl = "snn_agent.io.lsl_player:main"
+snn-test-electrode = "snn_agent.io.test_electrode:main"
+snn-ground-truth = "snn_agent.eval.ground_truth:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/snn_agent"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 99

@@ -1,3 +1,13 @@
+# AGENT-HINT: Asyncio event loop — the runtime heart of the SNN agent.
+# PURPOSE: Three input modes (electrode/lsl/synthetic), WebSocket broadcast,
+#          HTTP static file serving, UDP control output.
+# PIPELINE LOOP: _process_stream() runs build_pipeline() → complete_pipeline()
+#   then loops: preprocess → encode → DN + noise_gate → inhibit → L1 → L2 → decode.
+# WEBSOCKET COMMANDS: JSON {"key": value} from browser → ws_handler() dispatches.
+#   Supported: dn_threshold, l1_stdp_ltp, l1_stdp_ltd, inh_duration_ms,
+#   inh_strength_threshold, ng_inhibit_below_sd, decoder_strategy
+# CONFIG: Config in config.py (all params). Ports, broadcast_every.
+# SEE ALSO: pipeline.py (factory), index.html (GUI), config.py (all params)
 """
 snn_agent.server.app — Asyncio event loop for the SNN agent.
 
@@ -37,6 +47,11 @@ from snn_agent.core.pipeline import build_pipeline, complete_pipeline
 # ── Shared state ──────────────────────────────────────────────────────────────
 ws_clients: set = set()
 pipeline_refs: dict = {}
+
+# ── Runtime mode switching ────────────────────────────────────────────────────
+_stream_task: asyncio.Task | None = None
+_current_mode: str = "idle"
+_base_cfg: Config = DEFAULT_CONFIG
 
 # Electrode frame format: magic(uint16) + sample(float32)
 UDP_MAGIC = 0xABCD
@@ -106,10 +121,69 @@ async def ws_handler(websocket) -> None:
         async for msg in websocket:
             try:
                 data = json.loads(msg)
+                # DN threshold
                 if "dn_threshold" in data:
                     dn = pipeline_refs.get("dn")
                     if dn is not None:
                         dn.threshold = float(data["dn_threshold"])
+                # L1 STDP params (live tuning)
+                if "l1_stdp_ltp" in data:
+                    tpl = pipeline_refs.get("template")
+                    if tpl is not None:
+                        tpl.ltp = float(data["l1_stdp_ltp"])
+                if "l1_stdp_ltd" in data:
+                    tpl = pipeline_refs.get("template")
+                    if tpl is not None:
+                        tpl.ltd = float(data["l1_stdp_ltd"])
+                # Inhibition params
+                if "inh_duration_ms" in data:
+                    inh = pipeline_refs.get("inhibitor")
+                    if inh is not None:
+                        fs = pipeline_refs.get("effective_fs", 20000)
+                        inh.blanking_samples = max(1, int(float(data["inh_duration_ms"]) * 1e-3 * fs))
+                if "inh_strength_threshold" in data:
+                    inh = pipeline_refs.get("inhibitor")
+                    if inh is not None:
+                        inh.strength_threshold = float(data["inh_strength_threshold"])
+                # Noise gate params
+                if "ng_inhibit_below_sd" in data:
+                    ng = pipeline_refs.get("noise_gate")
+                    if ng is not None:
+                        ng.inhibit_below_sd = float(data["ng_inhibit_below_sd"])
+                # Decoder strategy switch
+                if "decoder_strategy" in data:
+                    dec = pipeline_refs.get("decoder")
+                    if dec is not None:
+                        dec.strategy = str(data["decoder_strategy"])
+                # ── Source launch commands ─────────────────────────
+                if "launch_synthetic" in data:
+                    params = data["launch_synthetic"]
+                    if not isinstance(params, dict):
+                        params = {}
+                    result = await _launch_mode("synthetic", **params)
+                    await websocket.send(json.dumps(result))
+                if "launch_file" in data:
+                    result = await _launch_mode(
+                        "file", file_path=str(data["launch_file"])
+                    )
+                    await websocket.send(json.dumps(result))
+                if "get_status" in data:
+                    await websocket.send(json.dumps({
+                        "status": "ok", "mode": _current_mode,
+                    }))
+                if "list_files" in data:
+                    raw_dir = (
+                        Path(__file__).resolve().parent.parent.parent.parent
+                        / "data" / "raw"
+                    )
+                    files = []
+                    if raw_dir.is_dir():
+                        files = sorted(
+                            str(f) for f in raw_dir.glob("*.ncs")
+                        )
+                    await websocket.send(json.dumps({
+                        "files": files, "directory": str(raw_dir),
+                    }))
             except (json.JSONDecodeError, ValueError, KeyError):
                 pass
     except Exception:
@@ -154,6 +228,11 @@ async def _process_stream(
     sample_buf: list[float] = []
     dn_buf: list[int] = []
     l1_spike_set: set[int] = set()
+    l2_spike_set: set[int] = set()
+    last_noise_gate: float = 1.0
+    last_inhibition: bool = False
+    l1_membrane_snapshot: list[float] = []
+    any_l1_fired_prev: bool = False
 
     dec_info = (
         f"  decimation {cfg.sampling_rate_hz}→{preproc.effective_fs} Hz"
@@ -202,33 +281,72 @@ async def _process_stream(
             if pipeline_obj is None:
                 pipeline_obj = complete_pipeline(cfg, effective_cfg, preproc, encoder)
                 pipeline_refs["dn"] = pipeline_obj.attention
+                pipeline_refs["template"] = pipeline_obj.template
+                pipeline_refs["decoder"] = pipeline_obj.decoder
+                pipeline_refs["inhibitor"] = pipeline_obj.inhibitor
+                pipeline_refs["noise_gate"] = pipeline_obj.noise_gate
+                pipeline_refs["effective_fs"] = preproc.effective_fs
                 print(
                     f"   ✅ Encoder calibrated: {encoder.n_centers} centres × "
                     f"{encoder.twindow} delays = {encoder.n_afferents} afferents"
                 )
+                components = ["DN", "L1"]
+                if pipeline_obj.inhibitor:
+                    components.append("Inhibitor")
+                if pipeline_obj.noise_gate:
+                    components.append("NoiseGate")
+                if pipeline_obj.output_layer:
+                    components.append("L2")
                 print(
-                    f"   ✅ Pipeline ready — processing at "
-                    f"{preproc.effective_fs} Hz"
+                    f"   ✅ Pipeline ready [{' → '.join(components)}] — "
+                    f"processing at {preproc.effective_fs} Hz"
                 )
 
             dn_spike = pipeline_obj.attention.step(afferents)
             dn_buf.append(int(dn_spike))
 
-            l1_spikes = pipeline_obj.template.step(afferents, dn_spike)
+            # Noise gate: Kalman-filter suppression (parallel to DN)
+            suppression = 1.0
+            if pipeline_obj.noise_gate is not None:
+                suppression = pipeline_obj.noise_gate.step(pp_sample)
+                last_noise_gate = suppression
+
+            # Global inhibition: post-spike blanking
+            if pipeline_obj.inhibitor is not None:
+                max_current = float(encoder.n_afferents)  # rough magnitude estimate
+                inh_factor = pipeline_obj.inhibitor.gate(max_current, any_l1_fired_prev)
+                suppression *= inh_factor
+                last_inhibition = pipeline_obj.inhibitor.active
+
+            l1_spikes = pipeline_obj.template.step(afferents, dn_spike, suppression)
+            any_l1_fired_prev = bool(np.any(l1_spikes))
             for idx in np.flatnonzero(l1_spikes):
                 l1_spike_set.add(int(idx))
 
-            result = pipeline_obj.decoder.step(l1_spikes, dn_spike)
-            if result is not None:
-                ctrl_val, confidence = result
-                last_control = ctrl_val
-                last_confidence = confidence
+            # Capture membrane state for visualization
+            l1_membrane_snapshot = pipeline_obj.template.mem.tolist()
+
+            # Optional L2 convergence layer
+            decoder_input = l1_spikes
+            if pipeline_obj.output_layer is not None:
+                l2_spikes = pipeline_obj.output_layer.step(l1_spikes)
+                for idx in np.flatnonzero(l2_spikes):
+                    l2_spike_set.add(int(idx))
+                decoder_input = l2_spikes
+
+            ctrl_val, confidence = pipeline_obj.decoder.step(
+                decoder_input, dn_spike
+            )
+            last_control = ctrl_val
+            last_confidence = confidence
+            # Send UDP only for significant control signals
+            if abs(ctrl_val) > 0.05:
                 ctrl_sock.sendto(
                     struct.pack("!ff", ctrl_val, confidence), ctrl_addr
                 )
 
             if step_count % broadcast_every == 0 and sample_buf:
-                await _broadcast(json.dumps({
+                broadcast_msg = {
                     "t": step_count,
                     "samples": list(sample_buf),
                     "dn_flags": list(dn_buf),
@@ -240,10 +358,17 @@ async def _process_stream(
                         if pipeline_obj
                         else 0
                     ),
-                }))
+                    "noise_gate": round(last_noise_gate, 4),
+                    "inhibition_active": last_inhibition,
+                    "l1_membrane": [round(v, 2) for v in l1_membrane_snapshot],
+                }
+                if pipeline_obj and pipeline_obj.output_layer is not None:
+                    broadcast_msg["l2_spikes"] = sorted(l2_spike_set)
+                await _broadcast(json.dumps(broadcast_msg))
                 sample_buf.clear()
                 dn_buf.clear()
                 l1_spike_set.clear()
+                l2_spike_set.clear()
 
         # Yield periodically
         if step_count % 100 == 0:
@@ -355,6 +480,161 @@ async def _synthetic_source(cfg: Config):
         await asyncio.sleep(1)
 
 
+# ── Array source (for file playback) ──────────────────────────────────────────
+async def _array_source(traces: np.ndarray, fs: float, name: str = "array"):
+    """Yield samples from a pre-loaded numpy array at real-time pace."""
+    n = len(traces)
+    print(f"   ▶  Streaming {name}: {n} samples at {fs:.0f} Hz ({n/fs:.1f}s)")
+    t0 = time.perf_counter()
+    for i in range(n):
+        yield i, float(traces[i])
+        if i % 500 == 0:
+            expected = i / fs
+            elapsed = time.perf_counter() - t0
+            if expected > elapsed:
+                await asyncio.sleep(expected - elapsed)
+            else:
+                await asyncio.sleep(0)
+    print(f"   ⏹  Playback complete: {name}")
+    await _broadcast(json.dumps(
+        {"mode_change": {"mode": "idle", "state": "finished"}}
+    ))
+    while True:
+        await asyncio.sleep(1)
+
+
+# ── Runtime mode launcher ─────────────────────────────────────────────────────
+async def _launch_mode(mode: str, **kwargs) -> dict:
+    """Cancel current stream and start a new source. Returns status dict."""
+    global _stream_task, _current_mode, pipeline_refs
+
+    # Cancel existing stream
+    if _stream_task is not None and not _stream_task.done():
+        _stream_task.cancel()
+        try:
+            await _stream_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    pipeline_refs.clear()
+    _current_mode = mode
+    await _broadcast(json.dumps(
+        {"mode_change": {"mode": mode, "state": "starting"}}
+    ))
+
+    cfg = _base_cfg
+
+    try:
+        if mode == "synthetic":
+            try:
+                import spikeinterface  # noqa: F401
+            except ImportError:
+                _current_mode = "error"
+                return {
+                    "status": "error",
+                    "message": "SpikeInterface not installed. "
+                    "Run: uv pip install -e '.[eval]'",
+                }
+            from dataclasses import replace as _repl
+
+            syn = cfg.synthetic
+            if kwargs:
+                syn = _repl(
+                    syn,
+                    duration_s=float(kwargs.get("duration_s", syn.duration_s)),
+                    num_units=int(kwargs.get("num_units", syn.num_units)),
+                    noise_level=float(
+                        kwargs.get("noise_level", syn.noise_level)
+                    ),
+                )
+            cfg = _repl(cfg, synthetic=syn, sampling_rate_hz=syn.fs)
+            source = _synthetic_source(cfg)
+            _stream_task = asyncio.create_task(
+                _process_stream(
+                    cfg,
+                    source,
+                    pace_realtime=syn.realtime,
+                    pace_fs=float(syn.fs),
+                )
+            )
+            return {"status": "ok", "mode": "synthetic"}
+
+        elif mode == "file":
+            file_path = kwargs.get("file_path", "")
+            p = Path(file_path)
+            if not p.exists():
+                _current_mode = "error"
+                return {
+                    "status": "error",
+                    "message": f"File not found: {file_path}",
+                }
+            if p.suffix.lower() not in (".ncs",):
+                _current_mode = "error"
+                return {
+                    "status": "error",
+                    "message": f"Unsupported format: {p.suffix} (need .ncs)",
+                }
+            try:
+                import mne
+
+                mne.set_log_level("ERROR")
+                raw = mne.io.read_raw_neuralynx(
+                    str(p.parent), preload=True
+                )
+                ch = p.stem
+                if ch in raw.ch_names:
+                    raw.pick([ch])
+                elif len(raw.ch_names) > 1:
+                    raw.pick([raw.ch_names[0]])
+                sfreq = int(raw.info["sfreq"])
+                traces = raw.get_data()[0]
+            except ImportError:
+                _current_mode = "error"
+                return {
+                    "status": "error",
+                    "message": "MNE not installed. "
+                    "Run: uv pip install -e '.[lsl]'",
+                }
+            except Exception as e:
+                _current_mode = "error"
+                return {
+                    "status": "error",
+                    "message": f"Read error: {e}",
+                }
+            cfg = cfg.with_overrides(sampling_rate_hz=sfreq)
+            source = _array_source(traces, float(sfreq), p.name)
+            _stream_task = asyncio.create_task(
+                _process_stream(
+                    cfg, source, pace_realtime=True, pace_fs=float(sfreq)
+                )
+            )
+            return {
+                "status": "ok",
+                "mode": "file",
+                "file": p.name,
+                "sfreq": sfreq,
+                "duration_s": round(len(traces) / sfreq, 1),
+            }
+
+        elif mode == "lsl":
+            _stream_task = asyncio.create_task(sim_loop_lsl(cfg))
+            return {"status": "ok", "mode": "lsl"}
+
+        elif mode == "electrode":
+            queue = kwargs.get("queue", asyncio.Queue(maxsize=4096))
+            _stream_task = asyncio.create_task(
+                sim_loop_electrode(cfg, queue)
+            )
+            return {"status": "ok", "mode": "electrode"}
+
+        else:
+            return {"status": "error", "message": f"Unknown mode: {mode}"}
+
+    except Exception as e:
+        _current_mode = "error"
+        return {"status": "error", "message": str(e)}
+
+
 # ── Simulation loops ──────────────────────────────────────────────────────────
 async def sim_loop_electrode(cfg: Config, queue: asyncio.Queue) -> None:
     source = _electrode_source(queue)
@@ -392,8 +672,9 @@ async def sim_loop_synthetic(cfg: Config) -> None:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 async def _async_main(cfg: Config) -> None:
+    global _base_cfg
+    _base_cfg = cfg
     mode = cfg.mode
-    queue = asyncio.Queue(maxsize=4096)
 
     _free_port(cfg.ws_port)
     _free_port(cfg.http_port)
@@ -401,45 +682,62 @@ async def _async_main(cfg: Config) -> None:
     # HTTP static server (daemon thread)
     threading.Thread(target=_run_http, args=(cfg.http_port,), daemon=True).start()
 
-    # WebSocket server
-    async def run_ws() -> None:
-        async with websockets.serve(
-            ws_handler,
-            "0.0.0.0",
-            cfg.ws_port,
-            reuse_address=True,
-            reuse_port=True,
-        ):
-            await asyncio.Future()
-
-    loop = asyncio.get_running_loop()
-
     n_l1 = cfg.l1.n_neurons
-    print(f"\n⚡ SNN Agent  [{mode} mode]")
+    print(f"\n⚡ SNN Agent")
     print(f"   L1 neurons   →  {n_l1}")
     print(f"   Strategy     →  {cfg.decoder.strategy}")
     print(f"   Browser      →  http://localhost:{cfg.http_port}")
-    print(f"   WebSocket    →  ws://localhost:{cfg.ws_port}\n")
+    print(f"   WebSocket    →  ws://localhost:{cfg.ws_port}")
+    print(f"   Mode         →  {mode}\n")
 
-    if mode == "synthetic":
-        await asyncio.gather(sim_loop_synthetic(cfg), run_ws())
-    elif mode == "lsl":
-        print(f"   LSL stream   →  '{cfg.lsl.stream_name}'")
-        print(f"   Control out  →  UDP port {cfg.udp_control_port}\n")
-        await asyncio.gather(sim_loop_lsl(cfg), run_ws())
-    else:
+    # Start initial stream based on configured mode
+    if mode == "electrode":
+        loop = asyncio.get_running_loop()
+        queue = asyncio.Queue(maxsize=4096)
         await loop.create_datagram_endpoint(
             lambda: UDPReceiver(queue, ELEC_FMT, ELEC_FRAME_SIZE),
             local_addr=("0.0.0.0", cfg.udp_electrode_port),
         )
         print(f"   Electrode in →  UDP port {cfg.udp_electrode_port}")
         print(f"   Control out  →  UDP port {cfg.udp_control_port}\n")
-        await asyncio.gather(sim_loop_electrode(cfg, queue), run_ws())
+        await _launch_mode("electrode", queue=queue)
+    elif mode == "lsl":
+        print(f"   LSL stream   →  '{cfg.lsl.stream_name}'")
+        print(f"   Control out  →  UDP port {cfg.udp_control_port}\n")
+        await _launch_mode("lsl")
+    else:
+        await _launch_mode("synthetic")
+
+    # WebSocket server — runs until shutdown
+    async with websockets.serve(
+        ws_handler,
+        "0.0.0.0",
+        cfg.ws_port,
+        reuse_address=True,
+        reuse_port=True,
+    ):
+        await asyncio.Future()  # run forever
 
 
 def main() -> None:
     """CLI entry point (``snn-serve``)."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="SNN Agent — live spike sorting server"
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["electrode", "lsl", "synthetic"],
+        default=None,
+        help="Input source mode (default: from config)",
+    )
+    args = parser.parse_args()
+
     cfg = DEFAULT_CONFIG
+    if args.mode:
+        cfg = cfg.with_overrides(mode=args.mode)
+
     try:
         asyncio.run(_async_main(cfg))
     except KeyboardInterrupt:

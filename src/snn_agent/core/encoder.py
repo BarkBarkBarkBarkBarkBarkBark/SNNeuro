@@ -1,3 +1,10 @@
+# AGENT-HINT: Temporal receptive field spike encoder.
+# PURPOSE: Converts scalar electrode samples → boolean afferent vector via
+#          amplitude-bin activation + shift-register delay taps.
+# CALIBRATION: First 8000 samples → MAD noise estimate → bin geometry.
+#   n_afferents is ONLY known after calibration. Pipeline is two-phase because of this.
+# CONFIG: EncoderConfig in config.py (overlap, dvm_factor, step_size, window_depth)
+# SEE ALSO: preprocessor.py (upstream), attention.py + template.py (downstream)
 """
 snn_agent.core.encoder — Temporal receptive field spike encoder.
 

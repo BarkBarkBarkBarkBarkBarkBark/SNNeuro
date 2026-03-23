@@ -1,3 +1,10 @@
+# AGENT-HINT: L1 template-matching layer with competitive STDP.
+# PURPOSE: 110 LIF neurons (snnTorch Leaky + WTA) that learn spike waveform templates.
+# INPUTS: afferents (encoder), dn_spike (attention), suppression (inhibition + noise_gate)
+# STDP: Global LTD on every post-spike + causal LTP for recent pre-spikes.
+# CONFIG: L1Config in config.py (n_neurons, dn_weight, stdp_ltp, stdp_ltd, etc.)
+# SEE ALSO: attention.py (dn_spike input), inhibition.py (post-spike blanking),
+#           noise_gate.py (noise suppression), output_layer.py (optional L2 downstream)
 """
 snn_agent.core.template — L1 template-matching layer with competitive STDP.
 
@@ -86,9 +93,24 @@ class TemplateLayer:
         self.last_pre_spike = np.full(n_afferents, -9999, dtype=np.int64)
 
     # ── public API ────────────────────────────────────────────────────
-    def step(self, afferents: np.ndarray, dn_spike: bool) -> np.ndarray:
+    def step(
+        self,
+        afferents: np.ndarray,
+        dn_spike: bool,
+        suppression: float = 1.0,
+    ) -> np.ndarray:
         """
         Advance one simulation step.
+
+        Parameters
+        ----------
+        afferents : np.ndarray
+            Bool array ``[n_afferents]`` from SpikeEncoder.
+        dn_spike : bool
+            Whether the attention neuron fired this step.
+        suppression : float
+            Multiplicative suppression factor from noise gate / inhibitor.
+            1.0 = no suppression, 0.0 = fully suppressed.
 
         Returns bool array ``(n_neurons,)`` — which L1 neurons fired.
         """
@@ -109,6 +131,10 @@ class TemplateLayer:
 
         if dn_spike:
             current = current + self.dn_weight
+
+        # Apply suppression from noise gate / inhibitor
+        if suppression < 1.0:
+            current = current * suppression
 
         with torch.no_grad():
             spk, self.mem = self.lif(current.unsqueeze(0), self.mem.unsqueeze(0))

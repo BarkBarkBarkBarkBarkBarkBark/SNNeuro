@@ -3,6 +3,15 @@
 <head>
 <meta charset="UTF-8">
 <title>SNN Agent</title>
+<!--
+  AGENT-HINT: Browser GUI for the SNN pipeline.
+  PURPOSE: Live visualization of raw signal, DN, noise gate, L1 raster, L2,
+           control signal, and a D3.js network topology diagram.
+  CONTROLS: Sliders for DN threshold, STDP LTP/LTD, inhibition duration/strength,
+            noise gate sensitivity, decoder strategy dropdown.
+  WEBSOCKET: Receives JSON state broadcasts from app.py, sends control commands.
+  SEE ALSO: app.py (ws_handler for commands), config.py (parameter ranges)
+-->
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -48,9 +57,8 @@ canvas {
 .stat-val  { color: #00ff41; }
 .stat-dn   { color: #ff6600; }
 .stat-ctrl { color: #00ccff; }
-
-
-
+.stat-ng   { color: #ff33cc; }
+.stat-inh  { color: #ff3333; }
 
 #status {
   margin-top: 7px;
@@ -58,22 +66,197 @@ canvas {
   color: #282828;
 }
 
-#threshold-ctrl {
-  margin-top: 8px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
+/* ── Controls panel ───────────────────────────────────────── */
+#controls {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 8px;
 }
 
-#dn_th_slider {
-  width: 200px;
+.ctrl-group {
+  background: #0a0a0a;
+  border: 1px solid #1a1a1a;
+  padding: 8px 10px;
+  border-radius: 4px;
+}
+
+.ctrl-group .ctrl-title {
+  color: #444;
+  font-size: 0.6rem;
+  letter-spacing: 2px;
+  margin-bottom: 6px;
+  text-transform: uppercase;
+}
+
+.ctrl-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.ctrl-row label {
+  color: #555;
+  font-size: 0.65rem;
+  min-width: 100px;
+}
+
+.ctrl-row input[type=range] {
+  width: 120px;
   accent-color: #ff6600;
+}
+
+.ctrl-row .ctrl-val {
+  color: #00ff41;
+  font-size: 0.65rem;
+  min-width: 50px;
+}
+
+.ctrl-row select {
+  background: #111;
+  color: #00ff41;
+  border: 1px solid #333;
+  font-family: 'Courier New', monospace;
+  font-size: 0.65rem;
+  padding: 2px 4px;
+}
+
+/* ── Network viz ──────────────────────────────────────────── */
+#network-panel {
+  margin-top: 12px;
+}
+
+#network_cv {
+  border-radius: 4px;
+}
+
+/* ── Two-column layout ────────────────────────────────────── */
+.main-layout {
+  display: flex;
+  gap: 16px;
+}
+
+.signal-col {
+  flex: 1;
+  min-width: 0;
+}
+
+.network-col {
+  width: 360px;
+  flex-shrink: 0;
+}
+
+/* ── Source launcher ──────────────────────────────────── */
+#launcher {
+  background: #0a0a0a;
+  border: 1px solid #1a1a1a;
+  border-radius: 4px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.launcher-mode {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 90px;
+}
+.mode-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: #333;
+}
+.mode-dot.active  { background: #00ff41; }
+.mode-dot.error   { background: #ff3333; }
+.mode-dot.starting { background: #ff6600; animation: pulse 1s infinite; }
+@keyframes pulse { 50% { opacity: 0.3; } }
+.mode-label {
+  color: #555;
+  font-size: 0.65rem;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+.launcher-sep {
+  width: 1px; height: 24px;
+  background: #222;
+}
+#launcher input[type=text] {
+  background: #111;
+  color: #00ff41;
+  border: 1px solid #333;
+  font-family: 'Courier New', monospace;
+  font-size: 0.65rem;
+  padding: 4px 8px;
+  width: 300px;
+  border-radius: 3px;
+}
+#launcher input[type=text]::placeholder { color: #333; }
+#launcher input[type=number] {
+  background: #111;
+  color: #00ff41;
+  border: 1px solid #333;
+  font-family: 'Courier New', monospace;
+  font-size: 0.65rem;
+  padding: 4px 4px;
+  width: 48px;
+  border-radius: 3px;
+}
+#launcher button {
+  background: #1a1a1a;
+  color: #00ff41;
+  border: 1px solid #333;
+  font-family: 'Courier New', monospace;
+  font-size: 0.65rem;
+  padding: 4px 10px;
+  cursor: pointer;
+  border-radius: 3px;
+  letter-spacing: 1px;
+}
+#launcher button:hover { background: #252525; border-color: #00ff41; }
+#launcher button:active { background: #00ff41; color: #0d0d0d; }
+#launcher label {
+  color: #444;
+  font-size: 0.6rem;
+}
+#launcher_msg {
+  color: #ff6600;
+  font-size: 0.6rem;
+  width: 100%;
+  min-height: 14px;
 }
 </style>
 </head>
 <body>
 
 <h1>⚡ SNN AGENT — LIVE SPIKE RASTER</h1>
+
+<!-- ── Source Launcher ─────────────────────────────────── -->
+<div id="launcher">
+  <div class="launcher-mode">
+    <div class="mode-dot" id="mode_dot"></div>
+    <span class="mode-label" id="mode_label">idle</span>
+  </div>
+  <div class="launcher-sep"></div>
+  <input type="text" id="file_path" placeholder="/path/to/recording.ncs" spellcheck="false">
+  <button id="btn_file">▶ LOAD FILE</button>
+  <button id="btn_browse" title="List .ncs files in data/raw/">📂</button>
+  <div class="launcher-sep"></div>
+  <button id="btn_synthetic">🧪 SYNTHETIC</button>
+  <label>dur</label>
+  <input type="number" id="synth_dur" value="20" min="1" max="120" step="1">
+  <label>units</label>
+  <input type="number" id="synth_units" value="2" min="1" max="10" step="1">
+  <label>noise</label>
+  <input type="number" id="synth_noise" value="8" min="1" max="30" step="1">
+  <div id="launcher_msg"></div>
+</div>
+
+<div class="main-layout">
+<div class="signal-col">
 
 <!-- Waveform canvas -->
 <div class="panel-label">RAW SIGNAL</div>
@@ -83,9 +266,17 @@ canvas {
 <div class="panel-label">ATTENTION NEURON (DN)</div>
 <canvas id="dn_cv" width="900" height="16"></canvas>
 
+<!-- Noise gate strip -->
+<div class="panel-label">NOISE GATE</div>
+<canvas id="ng_cv" width="900" height="16"></canvas>
+
 <!-- L1 spike raster -->
 <div class="panel-label">TEMPLATE LAYER (L1)</div>
 <canvas id="raster" width="900" height="180"></canvas>
+
+<!-- L2 spike raster (shown when L2 active) -->
+<div class="panel-label" id="l2_label" style="display:none">CLASSIFICATION LAYER (L2)</div>
+<canvas id="l2_cv" width="900" height="40" style="display:none"></canvas>
 
 <!-- Control signal trace -->
 <div class="panel-label">CONTROL SIGNAL</div>
@@ -95,18 +286,82 @@ canvas {
   <span>t = <span class="stat-val" id="s_t">—</span></span>
   <span>sample = <span class="stat-val" id="s_sample">—</span></span>
   <span>DN = <span class="stat-dn" id="s_dn">—</span></span>
-  <span>L1 spikes/s = <span class="stat-val" id="s_l1hz">—</span></span>
-  <span>control = <span class="stat-ctrl" id="s_ctrl">—</span></span>
-  <span>confidence = <span class="stat-ctrl" id="s_conf">—</span></span>
+  <span>L1 spk/s = <span class="stat-val" id="s_l1hz">—</span></span>
+  <span>ctrl = <span class="stat-ctrl" id="s_ctrl">—</span></span>
+  <span>conf = <span class="stat-ctrl" id="s_conf">—</span></span>
+  <span>noise gate = <span class="stat-ng" id="s_ng">—</span></span>
+  <span>inhibition = <span class="stat-inh" id="s_inh">—</span></span>
 </div>
 
-<div id="threshold-ctrl">
-  <span class="panel-label" style="margin:0">DN THRESHOLD</span>
-  <input type="range" id="dn_th_slider" min="10" max="300" step="1" value="100" disabled>
-  <span class="stat-dn" id="dn_th_val">—</span>
+</div><!-- /signal-col -->
+
+<div class="network-col">
+<div class="panel-label">NETWORK TOPOLOGY</div>
+<canvas id="network_cv" width="360" height="520"></canvas>
 </div>
 
+</div><!-- /main-layout -->
 
+<!-- ── Controls ─────────────────────────────────────────── -->
+<div id="controls">
+  <div class="ctrl-group">
+    <div class="ctrl-title">Attention Neuron (DN)</div>
+    <div class="ctrl-row">
+      <label>DN Threshold</label>
+      <input type="range" id="dn_th_slider" min="10" max="300" step="1" value="100" disabled>
+      <span class="ctrl-val stat-dn" id="dn_th_val">—</span>
+    </div>
+  </div>
+
+  <div class="ctrl-group">
+    <div class="ctrl-title">STDP Learning</div>
+    <div class="ctrl-row">
+      <label>LTP amplitude</label>
+      <input type="range" id="ltp_slider" min="0.001" max="0.04" step="0.001" value="0.016">
+      <span class="ctrl-val" id="ltp_val">0.016</span>
+    </div>
+    <div class="ctrl-row">
+      <label>LTD amplitude</label>
+      <input type="range" id="ltd_slider" min="-0.02" max="-0.0005" step="0.0005" value="-0.00763">
+      <span class="ctrl-val" id="ltd_val">-0.008</span>
+    </div>
+  </div>
+
+  <div class="ctrl-group">
+    <div class="ctrl-title">Post-Spike Inhibition</div>
+    <div class="ctrl-row">
+      <label>Duration (ms)</label>
+      <input type="range" id="inh_dur_slider" min="0" max="15" step="0.5" value="5">
+      <span class="ctrl-val" id="inh_dur_val">5.0</span>
+    </div>
+    <div class="ctrl-row">
+      <label>Strength Thr.</label>
+      <input type="range" id="inh_str_slider" min="20" max="400" step="5" value="150">
+      <span class="ctrl-val" id="inh_str_val">150</span>
+    </div>
+  </div>
+
+  <div class="ctrl-group">
+    <div class="ctrl-title">Noise Gate (Kalman)</div>
+    <div class="ctrl-row">
+      <label>Inhibit below σ</label>
+      <input type="range" id="ng_sd_slider" min="0.5" max="5.0" step="0.1" value="2.0">
+      <span class="ctrl-val" id="ng_sd_val">2.0</span>
+    </div>
+  </div>
+
+  <div class="ctrl-group">
+    <div class="ctrl-title">Decoder</div>
+    <div class="ctrl-row">
+      <label>Strategy</label>
+      <select id="decoder_sel">
+        <option value="rate" selected>rate</option>
+        <option value="population">population</option>
+        <option value="trigger">trigger</option>
+      </select>
+    </div>
+  </div>
+</div>
 
 <div id="status">● connecting…</div>
 
@@ -114,12 +369,20 @@ canvas {
 // ── Config ────────────────────────────────────────────────────────────────────
 const WS_PORT    = 8765;
 const N_L1       = 110;
+const N_L2       = 10;
 const CVW        = 900;
 const WAVE_H     = 120;
 const DN_H       = 16;
+const NG_H       = 16;
 const RASTER_H   = 180;
+const L2_H       = 40;
 const CTRL_H     = 60;
 const ROW_H      = RASTER_H / N_L1;
+const L2_ROW_H   = L2_H / N_L2;
+
+// Network viz
+const NET_W = 360;
+const NET_H = 520;
 
 // ── Canvas contexts ───────────────────────────────────────────────────────────
 const waveCv  = document.getElementById('wave');
@@ -128,28 +391,250 @@ const waveCtx = waveCv.getContext('2d');
 const dnCv    = document.getElementById('dn_cv');
 const dnCtx   = dnCv.getContext('2d');
 
+const ngCv    = document.getElementById('ng_cv');
+const ngCtx   = ngCv.getContext('2d');
+
 const rastCv  = document.getElementById('raster');
 const rastCtx = rastCv.getContext('2d');
+
+const l2Cv    = document.getElementById('l2_cv');
+const l2Ctx   = l2Cv.getContext('2d');
 
 const ctrlCv  = document.getElementById('ctrl_cv');
 const ctrlCtx = ctrlCv.getContext('2d');
 
+const netCv   = document.getElementById('network_cv');
+const netCtx  = netCv.getContext('2d');
+
 function clearCv(ctx, w, h) { ctx.fillStyle = '#020202'; ctx.fillRect(0, 0, w, h); }
 clearCv(waveCtx, CVW, WAVE_H);
 clearCv(dnCtx,   CVW, DN_H);
+clearCv(ngCtx,   CVW, NG_H);
 clearCv(rastCtx, CVW, RASTER_H);
+clearCv(l2Ctx,   CVW, L2_H);
 clearCv(ctrlCtx, CVW, CTRL_H);
+clearCv(netCtx,  NET_W, NET_H);
 
 // ── Pending data from WebSocket ───────────────────────────────────────────────
-let pendingSpikes  = [];
-let pendingSamples = [];
-let pendingDNFlags = [];
-let pendingControl = 0;
-let hasNew         = false;
+let pendingSpikes    = [];
+let pendingL2Spikes  = [];
+let pendingSamples   = [];
+let pendingDNFlags   = [];
+let pendingControl   = 0;
+let pendingNoiseGate = 1.0;
+let pendingInhActive = false;
+let pendingMembrane  = [];
+let hasNew           = false;
+let hasL2            = false;
 
 // Waveform state
 let waveMax = 1e-6;
 let prevY   = WAVE_H / 2;
+
+// ── Network topology state ────────────────────────────────────────────────────
+let netMembrane = new Float32Array(N_L1);
+let netDNActive = false;
+let netNGFactor = 1.0;
+let netInhActive = false;
+let netL1Spikes = new Set();
+let netL2Spikes = new Set();
+
+function drawNetworkViz() {
+  const ctx = netCtx;
+  ctx.fillStyle = '#020202';
+  ctx.fillRect(0, 0, NET_W, NET_H);
+
+  const cx = NET_W / 2;
+  const margin = 25;
+
+  // Column positions
+  const colX = [50, 130, 210, 290];
+
+  // ── Draw connections first (behind nodes) ──────────────────
+  ctx.globalAlpha = 0.08;
+  // DN → L1 connections
+  const dnY = 80;
+  for (let i = 0; i < Math.min(N_L1, 40); i++) {
+    const ly = 160 + i * (300 / Math.min(N_L1, 40));
+    ctx.strokeStyle = netDNActive ? '#ff6600' : '#222';
+    ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    ctx.moveTo(colX[1], dnY);
+    ctx.lineTo(colX[2], ly);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1.0;
+
+  // ── Encoder column (left) ──────────────────────────────────
+  ctx.fillStyle = '#333';
+  ctx.font = '9px Courier New';
+  ctx.textAlign = 'center';
+  ctx.fillText('ENC', colX[0], margin - 5);
+
+  // Draw a small bundle of afferent lines
+  for (let i = 0; i < 20; i++) {
+    const y = 40 + i * 22;
+    ctx.fillStyle = '#1a3a1a';
+    ctx.fillRect(colX[0] - 3, y, 6, 3);
+  }
+
+  // ── DN + NoiseGate column (middle-left) ────────────────────
+  ctx.fillStyle = '#444';
+  ctx.fillText('DN', colX[1], margin - 5);
+
+  // DN node
+  ctx.beginPath();
+  ctx.arc(colX[1], dnY, 12, 0, Math.PI * 2);
+  if (netDNActive) {
+    ctx.fillStyle = '#ff6600';
+    ctx.shadowColor = '#ff6600';
+    ctx.shadowBlur = 15;
+  } else {
+    ctx.fillStyle = '#2a1500';
+    ctx.shadowBlur = 0;
+  }
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = '#ff6600';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Noise Gate node
+  ctx.fillStyle = '#444';
+  ctx.fillText('NG', colX[1], 130);
+  ctx.beginPath();
+  ctx.arc(colX[1], 150, 10, 0, Math.PI * 2);
+
+  const ngColor = netNGFactor < 0.95 ? '#ff33cc' : '#1a0a1a';
+  ctx.fillStyle = ngColor;
+  if (netNGFactor < 0.95) {
+    ctx.shadowColor = '#ff33cc';
+    ctx.shadowBlur = 10;
+  }
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = '#ff33cc';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Noise gate factor bar
+  ctx.fillStyle = '#111';
+  ctx.fillRect(colX[1] - 15, 170, 30, 6);
+  ctx.fillStyle = netNGFactor < 0.5 ? '#ff33cc' : '#1a3a1a';
+  ctx.fillRect(colX[1] - 15, 170, 30 * netNGFactor, 6);
+
+  // Inhibition indicator
+  ctx.fillStyle = '#444';
+  ctx.fillText('INH', colX[1], 195);
+  ctx.beginPath();
+  ctx.arc(colX[1], 210, 8, 0, Math.PI * 2);
+  ctx.fillStyle = netInhActive ? '#ff3333' : '#1a0a0a';
+  if (netInhActive) { ctx.shadowColor = '#ff3333'; ctx.shadowBlur = 8; }
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = '#ff3333';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // ── L1 column (middle-right) ───────────────────────────────
+  ctx.fillStyle = '#444';
+  ctx.fillText('L1', colX[2], margin - 5);
+
+  const nVis = Math.min(N_L1, 40);
+  const l1StartY = 40;
+  const l1Spacing = 300 / nVis;
+
+  for (let i = 0; i < nVis; i++) {
+    const neuronIdx = Math.floor(i * N_L1 / nVis);
+    const y = l1StartY + i * l1Spacing;
+    const r = 3;
+
+    // Membrane potential → color intensity
+    const mem = netMembrane[neuronIdx] || 0;
+    const intensity = Math.min(1, Math.max(0, mem / 500));
+    const fired = netL1Spikes.has(neuronIdx);
+
+    ctx.beginPath();
+    ctx.arc(colX[2], y, r, 0, Math.PI * 2);
+
+    if (fired) {
+      ctx.fillStyle = '#00ff41';
+      ctx.shadowColor = '#00ff41';
+      ctx.shadowBlur = 8;
+    } else {
+      const g = Math.floor(30 + intensity * 180);
+      ctx.fillStyle = `rgb(0, ${g}, 0)`;
+      ctx.shadowBlur = 0;
+    }
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+
+  // ── L2/Decoder column (right) ──────────────────────────────
+  if (hasL2) {
+    ctx.fillStyle = '#444';
+    ctx.fillText('L2', colX[3], margin - 5);
+    for (let i = 0; i < N_L2; i++) {
+      const y = 60 + i * 35;
+      const fired = netL2Spikes.has(i);
+      ctx.beginPath();
+      ctx.arc(colX[3], y, 5, 0, Math.PI * 2);
+      ctx.fillStyle = fired ? '#00ccff' : '#0a1a2a';
+      if (fired) { ctx.shadowColor = '#00ccff'; ctx.shadowBlur = 10; }
+      ctx.fill();
+      ctx.shadowBlur = 0;
+      ctx.strokeStyle = '#00ccff';
+      ctx.lineWidth = 0.5;
+      ctx.stroke();
+    }
+  } else {
+    ctx.fillStyle = '#444';
+    ctx.fillText('DEC', colX[3], margin - 5);
+
+    // Decoder output indicator
+    const cv = Math.max(-1, Math.min(1, pendingControl));
+    const decY = 260;
+    ctx.beginPath();
+    ctx.arc(colX[3], decY, 14, 0, Math.PI * 2);
+    const cIntensity = Math.abs(cv);
+    const cBlue = Math.floor(50 + cIntensity * 200);
+    ctx.fillStyle = `rgb(0, ${Math.floor(cIntensity * 100)}, ${cBlue})`;
+    if (cIntensity > 0.1) { ctx.shadowColor = '#00ccff'; ctx.shadowBlur = cIntensity * 15; }
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = '#00ccff';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.fillStyle = '#00ccff';
+    ctx.font = '10px Courier New';
+    ctx.fillText(cv.toFixed(3), colX[3], decY + 28);
+  }
+
+  // ── Legend ─────────────────────────────────────────────────
+  const legY = NET_H - 50;
+  ctx.font = '8px Courier New';
+  ctx.textAlign = 'left';
+
+  const legends = [
+    { color: '#ff6600', label: 'DN active' },
+    { color: '#ff33cc', label: 'Noise suppressing' },
+    { color: '#ff3333', label: 'Inhibition active' },
+    { color: '#00ff41', label: 'L1 spike' },
+    { color: '#00ccff', label: 'Control out' },
+  ];
+  legends.forEach((l, i) => {
+    const x = 15;
+    const y = legY + i * 11;
+    ctx.fillStyle = l.color;
+    ctx.fillRect(x, y - 4, 6, 6);
+    ctx.fillStyle = '#444';
+    ctx.fillText(l.label, x + 10, y + 2);
+  });
+}
+
+// Initial network draw
+drawNetworkViz();
 
 // ── Render loop ───────────────────────────────────────────────────────────────
 function render() {
@@ -182,12 +667,18 @@ function render() {
   waveMax *= 0.9998;
   if (waveMax < 1e-10) waveMax = 1e-10;
 
-  // DN tint behind waveform (before the line so it sits underneath)
+  // DN tint behind waveform
   for (let i = 0; i < N; i++) {
     if (dnFlags[i]) {
       waveCtx.fillStyle = 'rgba(255, 102, 0, 0.25)';
       waveCtx.fillRect(CVW - N + i, 0, 1, WAVE_H);
     }
+  }
+
+  // Inhibition tint (red overlay when active)
+  if (pendingInhActive) {
+    waveCtx.fillStyle = 'rgba(255, 50, 50, 0.1)';
+    waveCtx.fillRect(CVW - N, 0, N, WAVE_H);
   }
 
   // draw connected waveform line with glow
@@ -208,7 +699,7 @@ function render() {
   waveCtx.stroke();
   waveCtx.restore();
 
-  // ── DN strip (per-sample resolution) ───────────────────────────────
+  // ── DN strip ───────────────────────────────────────────────
   dnCtx.drawImage(dnCv, -N, 0);
   dnCtx.fillStyle = '#020202';
   dnCtx.fillRect(CVW - N, 0, N, DN_H);
@@ -219,7 +710,23 @@ function render() {
     }
   }
 
-  // ── L1 raster ──────────────────────────────────────────────────────
+  // ── Noise gate strip ───────────────────────────────────────
+  ngCtx.drawImage(ngCv, -N, 0);
+  ngCtx.fillStyle = '#020202';
+  ngCtx.fillRect(CVW - N, 0, N, NG_H);
+  // Color intensity based on suppression factor
+  const ngVal = pendingNoiseGate;
+  if (ngVal < 0.95) {
+    const alpha = 1.0 - ngVal;
+    ngCtx.fillStyle = `rgba(255, 51, 204, ${alpha * 0.8})`;
+    ngCtx.fillRect(CVW - N, 0, N, NG_H);
+  }
+  // Thin green line at current suppression level
+  const ngLineY = NG_H - ngVal * NG_H;
+  ngCtx.fillStyle = '#00ff41';
+  ngCtx.fillRect(CVW - 1, ngLineY, 1, 1);
+
+  // ── L1 raster ──────────────────────────────────────────────
   rastCtx.drawImage(rastCv, -N, 0);
   rastCtx.fillStyle = '#020202';
   rastCtx.fillRect(CVW - N, 0, N, RASTER_H);
@@ -242,7 +749,20 @@ function render() {
     }
   }
 
-  // ── Control signal ─────────────────────────────────────────────────
+  // ── L2 raster (if active) ─────────────────────────────────
+  if (hasL2) {
+    l2Ctx.drawImage(l2Cv, -N, 0);
+    l2Ctx.fillStyle = '#020202';
+    l2Ctx.fillRect(CVW - N, 0, N, L2_H);
+    l2Ctx.fillStyle = '#00ccff';
+    for (const id of pendingL2Spikes) {
+      if (id < N_L2) {
+        l2Ctx.fillRect(CVW - 2, id * L2_ROW_H, 2, Math.max(1, L2_ROW_H - 1));
+      }
+    }
+  }
+
+  // ── Control signal ─────────────────────────────────────────
   ctrlCtx.drawImage(ctrlCv, -N, 0);
   ctrlCtx.fillStyle = '#020202';
   ctrlCtx.fillRect(CVW - N, 0, N, CTRL_H);
@@ -260,9 +780,23 @@ function render() {
   ctrlCtx.fillStyle = '#00ccff';
   ctrlCtx.fillRect(CVW - 2, ccy - 1, 2, 2);
 
+  // ── Network topology (throttled to ~10fps) ─────────────────
+  netDNActive = dnFlags.some(f => f);
+  netNGFactor = pendingNoiseGate;
+  netInhActive = pendingInhActive;
+  netL1Spikes = new Set(pendingSpikes);
+  netL2Spikes = new Set(pendingL2Spikes);
+  if (pendingMembrane.length > 0) {
+    for (let i = 0; i < Math.min(pendingMembrane.length, N_L1); i++) {
+      netMembrane[i] = pendingMembrane[i];
+    }
+  }
+  drawNetworkViz();
+
   pendingSamples = [];
   pendingDNFlags = [];
   pendingSpikes = [];
+  pendingL2Spikes = [];
   requestAnimationFrame(render);
 }
 requestAnimationFrame(render);
@@ -282,20 +816,127 @@ function updateStats(t, spikes, dn, ctrl, conf, sample) {
     document.getElementById('s_l1hz').textContent   = (totalL1 / dt).toFixed(0);
     document.getElementById('s_ctrl').textContent   = ctrl.toFixed(4);
     document.getElementById('s_conf').textContent   = conf.toFixed(4);
+    document.getElementById('s_ng').textContent     = pendingNoiseGate.toFixed(3);
+    document.getElementById('s_inh').textContent    = pendingInhActive ? 'ACTIVE' : 'idle';
     totalL1 = 0; totalDN = 0; lastCheck = now;
   }
 }
 
-// ── DN Threshold slider ──────────────────────────────────────────────────────
+// ── Control sliders / selects ─────────────────────────────────────────────────
 const thSlider = document.getElementById('dn_th_slider');
 const thVal    = document.getElementById('dn_th_val');
 let thInit = false;
 
+function sendCmd(key, val) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ [key]: val }));
+  }
+}
+
 thSlider.addEventListener('input', () => {
   const v = parseFloat(thSlider.value);
   thVal.textContent = v.toFixed(0);
-  if (ws && ws.readyState === WebSocket.OPEN)
-    ws.send(JSON.stringify({ dn_threshold: v }));
+  sendCmd('dn_threshold', v);
+});
+
+// STDP LTP slider
+const ltpSlider = document.getElementById('ltp_slider');
+const ltpVal = document.getElementById('ltp_val');
+ltpSlider.addEventListener('input', () => {
+  const v = parseFloat(ltpSlider.value);
+  ltpVal.textContent = v.toFixed(3);
+  sendCmd('l1_stdp_ltp', v);
+});
+
+// STDP LTD slider
+const ltdSlider = document.getElementById('ltd_slider');
+const ltdVal = document.getElementById('ltd_val');
+ltdSlider.addEventListener('input', () => {
+  const v = parseFloat(ltdSlider.value);
+  ltdVal.textContent = v.toFixed(4);
+  sendCmd('l1_stdp_ltd', v);
+});
+
+// Inhibition duration slider
+const inhDurSlider = document.getElementById('inh_dur_slider');
+const inhDurVal = document.getElementById('inh_dur_val');
+inhDurSlider.addEventListener('input', () => {
+  const v = parseFloat(inhDurSlider.value);
+  inhDurVal.textContent = v.toFixed(1);
+  sendCmd('inh_duration_ms', v);
+});
+
+// Inhibition strength threshold slider
+const inhStrSlider = document.getElementById('inh_str_slider');
+const inhStrVal = document.getElementById('inh_str_val');
+inhStrSlider.addEventListener('input', () => {
+  const v = parseFloat(inhStrSlider.value);
+  inhStrVal.textContent = v.toFixed(0);
+  sendCmd('inh_strength_threshold', v);
+});
+
+// Noise gate SD slider
+const ngSdSlider = document.getElementById('ng_sd_slider');
+const ngSdVal = document.getElementById('ng_sd_val');
+ngSdSlider.addEventListener('input', () => {
+  const v = parseFloat(ngSdSlider.value);
+  ngSdVal.textContent = v.toFixed(1);
+  sendCmd('ng_inhibit_below_sd', v);
+});
+
+// Decoder strategy select
+const decSel = document.getElementById('decoder_sel');
+decSel.addEventListener('change', () => {
+  sendCmd('decoder_strategy', decSel.value);
+});
+
+// ── Source launcher controls ──────────────────────────────────────────────────
+const modeLabel   = document.getElementById('mode_label');
+const modeDot     = document.getElementById('mode_dot');
+const launcherMsg = document.getElementById('launcher_msg');
+
+function setMode(mode, state) {
+  modeLabel.textContent = mode.toUpperCase();
+  modeDot.className = 'mode-dot';
+  if (state === 'running' || state === 'finished') modeDot.classList.add('active');
+  if (state === 'error') modeDot.classList.add('error');
+  if (state === 'starting') modeDot.classList.add('starting');
+}
+
+function showLauncherMsg(text, isError) {
+  launcherMsg.textContent = text;
+  launcherMsg.style.color = isError ? '#ff3333' : '#00ff41';
+  if (text) setTimeout(() => { launcherMsg.textContent = ''; }, 10000);
+}
+
+document.getElementById('btn_file').addEventListener('click', () => {
+  const path = document.getElementById('file_path').value.trim();
+  if (!path) { showLauncherMsg('Enter a file path', true); return; }
+  setMode('file', 'starting');
+  showLauncherMsg('Loading file…');
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ launch_file: path }));
+  }
+});
+
+document.getElementById('btn_browse').addEventListener('click', () => {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ list_files: true }));
+  }
+});
+
+document.getElementById('btn_synthetic').addEventListener('click', () => {
+  setMode('synthetic', 'starting');
+  showLauncherMsg('Generating synthetic recording…');
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({
+      launch_synthetic: {
+        duration_s:  parseFloat(document.getElementById('synth_dur').value),
+        num_units:   parseInt(document.getElementById('synth_units').value),
+        noise_level: parseFloat(document.getElementById('synth_noise').value),
+      }
+    }));
+  }
 });
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
@@ -315,11 +956,51 @@ function connect() {
   ws.onmessage = ({ data }) => {
     const msg = JSON.parse(data);
 
-    pendingSpikes  = msg.spikes  || [];
-    pendingSamples = msg.samples || [msg.sample ?? 0];
-    pendingDNFlags = msg.dn_flags || [msg.dn ?? 0];
-    pendingControl = msg.control ?? 0;
+    // ── Server responses (launch, status, file list) ──────
+    if (msg.mode_change) {
+      setMode(msg.mode_change.mode, msg.mode_change.state);
+      if (msg.mode_change.state === 'finished') showLauncherMsg('Playback complete');
+    }
+    if (msg.status === 'ok' && msg.mode) {
+      setMode(msg.mode, 'running');
+      if (msg.file) showLauncherMsg('▶ ' + msg.file + ' (' + msg.duration_s + 's at ' + msg.sfreq + ' Hz)');
+      else showLauncherMsg('▶ ' + msg.mode + ' mode active');
+    }
+    if (msg.status === 'error') {
+      setMode('error', 'error');
+      showLauncherMsg(msg.message, true);
+    }
+    if (msg.files !== undefined) {
+      if (msg.files.length > 0) {
+        document.getElementById('file_path').value = msg.files[0];
+        showLauncherMsg('Found ' + msg.files.length + ' file(s) in ' + msg.directory);
+      } else {
+        showLauncherMsg('No .ncs files found in data/raw/', true);
+      }
+    }
+    // Skip if this is a non-stream message (no samples)
+    if (msg.samples === undefined && msg.sample === undefined && !msg.spikes) {
+      return;
+    }
+
+    pendingSpikes    = msg.spikes  || [];
+    pendingSamples   = msg.samples || [msg.sample ?? 0];
+    pendingDNFlags   = msg.dn_flags || [msg.dn ?? 0];
+    pendingControl   = msg.control ?? 0;
+    pendingNoiseGate = msg.noise_gate ?? 1.0;
+    pendingInhActive = msg.inhibition_active ?? false;
+    pendingMembrane  = msg.l1_membrane ?? [];
     hasNew = true;
+
+    // L2 spikes (show/hide L2 panel)
+    if (msg.l2_spikes !== undefined) {
+      pendingL2Spikes = msg.l2_spikes;
+      if (!hasL2) {
+        hasL2 = true;
+        document.getElementById('l2_label').style.display = '';
+        document.getElementById('l2_cv').style.display = '';
+      }
+    }
 
     const dnSum = pendingDNFlags.reduce((a, b) => a + b, 0);
     const lastSample = pendingSamples[pendingSamples.length - 1] || 0;
@@ -334,7 +1015,6 @@ function connect() {
   };
 }
 connect();
-
 
 </script>
 </body>

@@ -1,3 +1,9 @@
+# AGENT-HINT: Attention neuron (DN) — excitatory energy/outlier detector.
+# PURPOSE: Single LIF neuron with synaptic depression. Fires when signal energy
+#          exceeds noise floor. Its spike excites L1 neurons and boosts decoder confidence.
+# COUNTERPART: noise_gate.py is the inhibitory parallel — suppresses noise.
+# CONFIG: DNConfig in config.py (threshold_factor, depression_tau, depression_frac)
+# SEE ALSO: template.py (consumes dn_spike), decoder.py (confidence gating)
 """
 snn_agent.core.attention — Attention neuron (DN) with synaptic depression.
 

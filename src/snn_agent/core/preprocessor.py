@@ -1,3 +1,8 @@
+# AGENT-HINT: Front-end signal conditioning.
+# PURPOSE: Causal bandpass (300–6000 Hz) + decimation (÷4). Streaming-safe.
+# OUTPUT: effective_fs = sampling_rate_hz / decimation_factor (e.g. 80k → 20k)
+# CONFIG: PreprocessConfig in config.py (bandpass_lo_hz, bandpass_hi_hz, etc.)
+# SEE ALSO: encoder.py (downstream), pipeline.py (effective_fs propagation)
 """
 snn_agent.core.preprocessor — Causal bandpass filter + decimation.
 

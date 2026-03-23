@@ -93,9 +93,11 @@ def evaluate_pipeline(
     traces = recording.get_traces(segment_index=0)[:, 0]
     n_total = len(traces)
     l1_spike_log: dict[int, list[int]] = {}
+    l2_spike_log: dict[int, list[int]] = {}
     step_count = 0
     t0 = time.perf_counter()
     _early_exit = False
+    any_l1_fired_prev = False
 
     try:
         for frame_idx in range(n_total):
@@ -140,8 +142,31 @@ def evaluate_pipeline(
                         raise _ThresholdUnreachable()
 
                 dn_spike = pipeline_obj.attention.step(afferents)
-                l1_spikes = pipeline_obj.template.step(afferents, dn_spike)
-                pipeline_obj.decoder.step(l1_spikes, dn_spike)
+
+                # Noise gate suppression
+                suppression = 1.0
+                if pipeline_obj.noise_gate is not None:
+                    suppression = pipeline_obj.noise_gate.step(pp_sample)
+
+                # Global inhibition
+                if pipeline_obj.inhibitor is not None:
+                    max_current = float(encoder.n_afferents)
+                    inh_factor = pipeline_obj.inhibitor.gate(max_current, any_l1_fired_prev)
+                    suppression *= inh_factor
+
+                l1_spikes = pipeline_obj.template.step(afferents, dn_spike, suppression)
+                any_l1_fired_prev = bool(np.any(l1_spikes))
+
+                # Optional L2
+                decoder_input = l1_spikes
+                if pipeline_obj.output_layer is not None:
+                    l2_spikes = pipeline_obj.output_layer.step(l1_spikes)
+                    for idx in np.flatnonzero(l2_spikes):
+                        nid = int(idx)
+                        l2_spike_log.setdefault(nid, []).append(frame_idx)
+                    decoder_input = l2_spikes
+
+                pipeline_obj.decoder.step(decoder_input, dn_spike)
 
                 for idx in np.flatnonzero(l1_spikes):
                     nid = int(idx)

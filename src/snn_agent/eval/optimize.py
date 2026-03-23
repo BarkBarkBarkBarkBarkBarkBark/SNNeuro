@@ -1,3 +1,8 @@
+# AGENT-HINT: Optuna hyperparameter optimization.
+# PURPOSE: TPE sampler searches the space defined in optimization_manifest.yaml.
+# SEARCH SPACE: 13 params (8 original + 5 new: inhibition + noise gate).
+# ADDING PARAMS: Add to docs/optimization_manifest.yaml, add flat-key to config.py _FLAT_MAP.
+# SEE ALSO: evaluate.py (objective function), config.py (Config.from_flat), data/best_config.json
 """
 snn_agent.eval.optimize — Optuna hyperparameter optimisation for the SNN.
 
@@ -42,6 +47,9 @@ def suggest_params(trial: optuna.Trial, param_defs: dict) -> dict:
     overrides: dict = {}
     for name, spec in param_defs.items():
         ptype = spec["type"]
+        if ptype == "bool":
+            overrides[name] = trial.suggest_categorical(name, [True, False])
+            continue
         lo, hi = spec["low"], spec["high"]
         if ptype == "float":
             overrides[name] = trial.suggest_float(name, lo, hi)

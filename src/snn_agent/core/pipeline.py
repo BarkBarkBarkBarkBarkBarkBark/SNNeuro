@@ -16,8 +16,11 @@ from snn_agent.core.encoder import SpikeEncoder
 from snn_agent.core.attention import AttentionNeuron
 from snn_agent.core.template import TemplateLayer
 from snn_agent.core.decoder import ControlDecoder
+from snn_agent.core.inhibition import GlobalInhibitor
+from snn_agent.core.noise_gate import NoiseGateNeuron
+from snn_agent.core.output_layer import ClassificationLayer
 
-__all__ = ["Pipeline", "build_pipeline"]
+__all__ = ["Pipeline", "build_pipeline", "complete_pipeline"]
 
 
 class Pipeline(NamedTuple):
@@ -28,6 +31,9 @@ class Pipeline(NamedTuple):
     attention: AttentionNeuron
     template: TemplateLayer
     decoder: ControlDecoder
+    inhibitor: GlobalInhibitor | None
+    noise_gate: NoiseGateNeuron | None
+    output_layer: ClassificationLayer | None
     cfg: Config
 
 
@@ -95,7 +101,27 @@ def complete_pipeline(
 
     attention = AttentionNeuron(effective_cfg, n_aff)
     template = TemplateLayer(cfg, n_aff)
-    decoder = ControlDecoder(effective_cfg, cfg.l1.n_neurons)
+
+    # Global post-spike inhibition (default: enabled, 5 ms blanking)
+    inhibitor: GlobalInhibitor | None = None
+    if cfg.inhibition.enabled:
+        inhibitor = GlobalInhibitor(effective_cfg)
+
+    # Kalman noise gate (parallel inhibitory pathway)
+    noise_gate_obj: NoiseGateNeuron | None = None
+    if cfg.noise_gate.enabled:
+        # Use encoder's calibrated noise estimate as baseline
+        noise_sigma = encoder.dvm / cfg.encoder.dvm_factor  # reverse: dvm = factor * sigma
+        noise_gate_obj = NoiseGateNeuron(effective_cfg, noise_sigma)
+
+    # Optional L2 convergence layer
+    output_layer: ClassificationLayer | None = None
+    n_decoder_input = cfg.l1.n_neurons
+    if cfg.use_l2:
+        output_layer = ClassificationLayer(cfg, cfg.l1.n_neurons)
+        n_decoder_input = cfg.l2.n_neurons
+
+    decoder = ControlDecoder(effective_cfg, n_decoder_input)
 
     return Pipeline(
         preprocessor=preprocessor,
@@ -103,5 +129,8 @@ def complete_pipeline(
         attention=attention,
         template=template,
         decoder=decoder,
+        inhibitor=inhibitor,
+        noise_gate=noise_gate_obj,
+        output_layer=output_layer,
         cfg=effective_cfg,
     )

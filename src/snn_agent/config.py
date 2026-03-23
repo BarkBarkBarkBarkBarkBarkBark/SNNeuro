@@ -1,3 +1,7 @@
+# AGENT-HINT: Single source of truth for ALL parameters.
+# ADDING A NEW COMPONENT? 1) Add a frozen dataclass here. 2) Add it to Config.
+# 3) Add flat-key entries to _FLAT_MAP. 4) Wire in pipeline.py.
+# SEE ALSO: AGENTS.md (full extension checklist), pipeline.py, optimize.py
 """
 snn_agent.config — Single-source-of-truth configuration as a frozen dataclass.
 
@@ -63,12 +67,13 @@ class L1Config:
 
 @dataclass(frozen=True, slots=True)
 class DecoderConfig:
-    strategy: Literal["rate", "population", "trigger"] = "rate"
-    window_ms: float = 5.0
+    strategy: Literal["rate", "population", "trigger"] = "population"
+    window_ms: float = 25.0
     weights: list[float] | None = None
-    threshold: float = 0.5
+    threshold: float = 3.0
     leaky_tau_ms: float = 10.0
     dn_confidence_window_ms: float = 5.0
+    max_rate_hz: float = 100.0   # normalisation ceiling for rate strategy
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +92,42 @@ class SyntheticConfig:
     noise_level: float = 8.0
     seed: int = 42
     realtime: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class InhibitionConfig:
+    """Global post-spike inhibition (5 ms blanking by default)."""
+    enabled: bool = True
+    duration_ms: float = 5.0
+    strength_threshold: float = 150.0  # current magnitude to bypass blanking
+
+
+@dataclass(frozen=True, slots=True)
+class NoiseGateConfig:
+    """Kalman-filter noise suppression gate (parallel to DN)."""
+    enabled: bool = True
+    process_noise: float = 0.01
+    measurement_noise: float = 1.0
+    inhibit_below_sd: float = 2.0   # suppress when σ_est < factor × σ_noise
+    suppression_factor: float = 0.1  # minimum scaling when fully suppressing
+
+
+@dataclass(frozen=True, slots=True)
+class L2Config:
+    """Optional L2 classification / convergence layer."""
+    n_neurons: int = 10
+    tm_samples: int = 2
+    refractory_samples: int = 1
+    wi_factor: float = 10.0  # lateral inhibition strength (matches MATLAB L2_wiFactor)
+    threshold_factor: float = 0.15
+    init_w_min: float = 0.3
+    init_w_max: float = 0.8
+    w_lo: float = 0.0
+    w_hi: float = 1.0
+    stdp_ltp: float = 0.01
+    stdp_ltp_window: int = 4
+    stdp_ltd: float = -0.005
+    freeze_stdp: bool = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -122,6 +163,12 @@ class Config:
     decoder: DecoderConfig = field(default_factory=DecoderConfig)
     lsl: LSLConfig = field(default_factory=LSLConfig)
     synthetic: SyntheticConfig = field(default_factory=SyntheticConfig)
+    inhibition: InhibitionConfig = field(default_factory=InhibitionConfig)
+    noise_gate: NoiseGateConfig = field(default_factory=NoiseGateConfig)
+    l2: L2Config = field(default_factory=L2Config)
+
+    # Feature flags
+    use_l2: bool = False
 
     # Viz
     broadcast_every: int = 5
@@ -210,6 +257,7 @@ _FLAT_MAP: dict[str, tuple[str | None, str]] = {
     "ctrl_threshold": ("decoder", "threshold"),
     "ctrl_leaky_tau_ms": ("decoder", "leaky_tau_ms"),
     "ctrl_dn_confidence_window_ms": ("decoder", "dn_confidence_window_ms"),
+    "ctrl_max_rate_hz": ("decoder", "max_rate_hz"),
     # lsl
     "lsl_stream_name": ("lsl", "stream_name"),
     "lsl_pick_channel": ("lsl", "pick_channel"),
@@ -222,6 +270,29 @@ _FLAT_MAP: dict[str, tuple[str | None, str]] = {
     "synth_noise_level": ("synthetic", "noise_level"),
     "synth_seed": ("synthetic", "seed"),
     "synth_realtime": ("synthetic", "realtime"),
+    # inhibition
+    "inh_enabled": ("inhibition", "enabled"),
+    "inh_duration_ms": ("inhibition", "duration_ms"),
+    "inh_strength_threshold": ("inhibition", "strength_threshold"),
+    # noise gate
+    "ng_enabled": ("noise_gate", "enabled"),
+    "ng_process_noise": ("noise_gate", "process_noise"),
+    "ng_measurement_noise": ("noise_gate", "measurement_noise"),
+    "ng_inhibit_below_sd": ("noise_gate", "inhibit_below_sd"),
+    "ng_suppression_factor": ("noise_gate", "suppression_factor"),
+    # l2
+    "use_l2": (None, "use_l2"),
+    "l2_n_neurons": ("l2", "n_neurons"),
+    "l2_tm_samples": ("l2", "tm_samples"),
+    "l2_refractory_samples": ("l2", "refractory_samples"),
+    "l2_wi_factor": ("l2", "wi_factor"),
+    "l2_threshold_factor": ("l2", "threshold_factor"),
+    "l2_init_w_min": ("l2", "init_w_min"),
+    "l2_init_w_max": ("l2", "init_w_max"),
+    "l2_stdp_ltp": ("l2", "stdp_ltp"),
+    "l2_stdp_ltd": ("l2", "stdp_ltd"),
+    "l2_stdp_ltp_window": ("l2", "stdp_ltp_window"),
+    "l2_freeze_stdp": ("l2", "freeze_stdp"),
 }
 
 
@@ -255,6 +326,12 @@ def _from_flat(flat: dict) -> Config:
         top["lsl"] = LSLConfig(**subs["lsl"])
     if "synthetic" in subs:
         top["synthetic"] = SyntheticConfig(**subs["synthetic"])
+    if "inhibition" in subs:
+        top["inhibition"] = InhibitionConfig(**subs["inhibition"])
+    if "noise_gate" in subs:
+        top["noise_gate"] = NoiseGateConfig(**subs["noise_gate"])
+    if "l2" in subs:
+        top["l2"] = L2Config(**subs["l2"])
 
     return Config(**top)
 

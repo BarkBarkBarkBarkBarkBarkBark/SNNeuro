@@ -31,15 +31,23 @@ recording:
   seed: 42
 
 # ── Search space ─────────────────────────────────────────────────────────────
-#  8 curated high-impact parameters.
+#  13 curated high-impact parameters (8 original + 5 new).
 #  Types:  float  — suggest_float (uniform)
 #          log    — suggest_float (log=True)
 #          int    — suggest_int
+#          bool   — suggest_categorical([True, False])
 #
 #  Ranges informed by diagnostics: L1 threshold is derived from
 #  (l1_dn_weight + enc_overlap × 7) × (1−exp(−step/τ)) / (1−exp(−1/τ))
 #  and the membrane must actually reach it (~65-120 current per step,
 #  β≈0.61 decay). Small step_size + high dn_weight → reachable threshold.
+#
+#  NEW PARAMETERS (v2):
+#  - inh_duration_ms: post-spike blanking window
+#  - inh_strength_threshold: current needed to bypass blanking
+#  - ng_process_noise: Kalman filter adaptation speed
+#  - ng_inhibit_below_sd: noise gate sensitivity
+#  - ng_suppression_factor: max noise suppression strength
 #
 parameters:
   dn_threshold_factor:
@@ -90,3 +98,35 @@ parameters:
     high: 120
     step: 10
     description: "Number of L1 template neurons"
+
+  # ── NEW: Inhibition parameters ───────────────────────────────────────
+  inh_duration_ms:
+    type: float
+    low:  1.0
+    high: 10.0
+    description: "Post-spike blanking window in ms (default 5 ms)"
+
+  inh_strength_threshold:
+    type: float
+    low:  50.0
+    high: 300.0
+    description: "Input current magnitude to bypass blanking (strong-signal pass-through)"
+
+  # ── NEW: Noise gate parameters ───────────────────────────────────────
+  ng_process_noise:
+    type: log
+    low:  0.001
+    high: 0.1
+    description: "Kalman filter process noise Q (adaptation speed — too fast tracks spikes as noise)"
+
+  ng_inhibit_below_sd:
+    type: float
+    low:  1.2
+    high: 3.5
+    description: "Suppress when estimated σ < factor × σ_noise (higher = more aggressive gating)"
+
+  ng_suppression_factor:
+    type: float
+    low:  0.0
+    high: 0.3
+    description: "Minimum suppression multiplier when fully gating (0 = total block, 0.3 = mild)"

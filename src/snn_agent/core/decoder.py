@@ -3,7 +3,7 @@
 # STRATEGIES: "rate" (sliding window), "population" (leaky integrator), "trigger" (binary).
 # CONFIDENCE: Sliding-window average of DN spike activity.
 # CONFIG: DecoderConfig in config.py (strategy, window_ms, threshold, etc.)
-# SEE ALSO: template.py (L1 spikes), output_layer.py (L2 spikes), app.py (UDP output)
+# SEE ALSO: template.py (L1 spikes), dec_layer.py (DEC spikes), app.py (UDP output)
 """
 snn_agent.core.decoder — Control signal decoder for closed-loop experiments.
 

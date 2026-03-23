@@ -228,7 +228,7 @@ async def _process_stream(
     sample_buf: list[float] = []
     dn_buf: list[int] = []
     l1_spike_set: set[int] = set()
-    l2_spike_set: set[int] = set()
+    dec_spike_set: set[int] = set()
     last_noise_gate: float = 1.0
     last_inhibition: bool = False
     l1_membrane_snapshot: list[float] = []
@@ -295,8 +295,8 @@ async def _process_stream(
                     components.append("Inhibitor")
                 if pipeline_obj.noise_gate:
                     components.append("NoiseGate")
-                if pipeline_obj.output_layer:
-                    components.append("L2")
+                if pipeline_obj.dec_layer:
+                    components.append("DEC(16)")
                 print(
                     f"   ✅ Pipeline ready [{' → '.join(components)}] — "
                     f"processing at {preproc.effective_fs} Hz"
@@ -326,21 +326,27 @@ async def _process_stream(
             # Capture membrane state for visualization
             l1_membrane_snapshot = pipeline_obj.template.mem.tolist()
 
-            # Optional L2 convergence layer
+            # Optional DEC spiking decoder layer (16 neurons)
             decoder_input = l1_spikes
-            if pipeline_obj.output_layer is not None:
-                l2_spikes = pipeline_obj.output_layer.step(l1_spikes)
-                for idx in np.flatnonzero(l2_spikes):
-                    l2_spike_set.add(int(idx))
-                decoder_input = l2_spikes
+            if pipeline_obj.dec_layer is not None:
+                dec_spikes = pipeline_obj.dec_layer.step(l1_spikes, dn_spike)
+                for idx in np.flatnonzero(dec_spikes):
+                    dec_spike_set.add(int(idx))
+                decoder_input = dec_spikes
 
             ctrl_val, confidence = pipeline_obj.decoder.step(
                 decoder_input, dn_spike
             )
             last_control = ctrl_val
             last_confidence = confidence
-            # Send UDP only for significant control signals
-            if abs(ctrl_val) > 0.05:
+            # Send UDP: hex bitmask if DEC active, else (ctrl, conf) floats
+            if pipeline_obj.dec_layer is not None:
+                hex_word = pipeline_obj.dec_layer.hex_output
+                if hex_word > 0:
+                    ctrl_sock.sendto(
+                        struct.pack("!H", hex_word), ctrl_addr
+                    )
+            elif abs(ctrl_val) > 0.05:
                 ctrl_sock.sendto(
                     struct.pack("!ff", ctrl_val, confidence), ctrl_addr
                 )
@@ -362,13 +368,14 @@ async def _process_stream(
                     "inhibition_active": last_inhibition,
                     "l1_membrane": [round(v, 2) for v in l1_membrane_snapshot],
                 }
-                if pipeline_obj and pipeline_obj.output_layer is not None:
-                    broadcast_msg["l2_spikes"] = sorted(l2_spike_set)
+                if pipeline_obj and pipeline_obj.dec_layer is not None:
+                    broadcast_msg["dec_spikes"] = sorted(dec_spike_set)
+                    broadcast_msg["dec_hex"] = f"0x{pipeline_obj.dec_layer.hex_output:04X}"
                 await _broadcast(json.dumps(broadcast_msg))
                 sample_buf.clear()
                 dn_buf.clear()
                 l1_spike_set.clear()
-                l2_spike_set.clear()
+                dec_spike_set.clear()
 
         # Yield periodically
         if step_count % 100 == 0:

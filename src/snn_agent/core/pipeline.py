@@ -18,7 +18,7 @@ from snn_agent.core.template import TemplateLayer
 from snn_agent.core.decoder import ControlDecoder
 from snn_agent.core.inhibition import GlobalInhibitor
 from snn_agent.core.noise_gate import NoiseGateNeuron
-from snn_agent.core.output_layer import ClassificationLayer
+from snn_agent.core.dec_layer import DECLayer
 
 __all__ = ["Pipeline", "build_pipeline", "complete_pipeline"]
 
@@ -33,7 +33,7 @@ class Pipeline(NamedTuple):
     decoder: ControlDecoder
     inhibitor: GlobalInhibitor | None
     noise_gate: NoiseGateNeuron | None
-    output_layer: ClassificationLayer | None
+    dec_layer: DECLayer | None
     cfg: Config
 
 
@@ -114,12 +114,12 @@ def complete_pipeline(
         noise_sigma = encoder.dvm / cfg.encoder.dvm_factor  # reverse: dvm = factor * sigma
         noise_gate_obj = NoiseGateNeuron(effective_cfg, noise_sigma)
 
-    # Optional L2 convergence layer
-    output_layer: ClassificationLayer | None = None
+    # Optional DEC spiking decoder layer (16 neurons — replaces old L2)
+    dec_layer_obj: DECLayer | None = None
     n_decoder_input = cfg.l1.n_neurons
-    if cfg.use_l2:
-        output_layer = ClassificationLayer(cfg, cfg.l1.n_neurons)
-        n_decoder_input = cfg.l2.n_neurons
+    if cfg.use_dec:
+        dec_layer_obj = DECLayer(cfg, cfg.l1.n_neurons)
+        n_decoder_input = dec_layer_obj.N_DEC
 
     decoder = ControlDecoder(effective_cfg, n_decoder_input)
 
@@ -131,6 +131,6 @@ def complete_pipeline(
         decoder=decoder,
         inhibitor=inhibitor,
         noise_gate=noise_gate_obj,
-        output_layer=output_layer,
+        dec_layer=dec_layer_obj,
         cfg=effective_cfg,
     )

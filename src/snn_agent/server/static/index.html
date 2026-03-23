@@ -5,8 +5,8 @@
 <title>SNN Agent</title>
 <!--
   AGENT-HINT: Browser GUI for the SNN pipeline.
-  PURPOSE: Live visualization of raw signal, DN, noise gate, L1 raster, L2,
-           control signal, and a D3.js network topology diagram.
+  PURPOSE: Live visualization of raw signal, DN, noise gate, L1 raster, DEC (16 neurons),
+           control signal, hex output, and a network topology diagram.
   CONTROLS: Sliders for DN threshold, STDP LTP/LTD, inhibition duration/strength,
             noise gate sensitivity, decoder strategy dropdown.
   WEBSOCKET: Receives JSON state broadcasts from app.py, sends control commands.
@@ -274,9 +274,9 @@ canvas {
 <div class="panel-label">TEMPLATE LAYER (L1)</div>
 <canvas id="raster" width="900" height="180"></canvas>
 
-<!-- L2 spike raster (shown when L2 active) -->
-<div class="panel-label" id="l2_label" style="display:none">CLASSIFICATION LAYER (L2)</div>
-<canvas id="l2_cv" width="900" height="40" style="display:none"></canvas>
+<!-- DEC spike raster (16 spiking decoder neurons) -->
+<div class="panel-label" id="dec_label">DECODER LAYER (DEC × 16)</div>
+<canvas id="dec_cv" width="900" height="48"></canvas>
 
 <!-- Control signal trace -->
 <div class="panel-label">CONTROL SIGNAL</div>
@@ -291,6 +291,7 @@ canvas {
   <span>conf = <span class="stat-ctrl" id="s_conf">—</span></span>
   <span>noise gate = <span class="stat-ng" id="s_ng">—</span></span>
   <span>inhibition = <span class="stat-inh" id="s_inh">—</span></span>
+  <span>DEC hex = <span class="stat-ctrl" id="s_hex">0x0000</span></span>
 </div>
 
 </div><!-- /signal-col -->
@@ -369,16 +370,23 @@ canvas {
 // ── Config ────────────────────────────────────────────────────────────────────
 const WS_PORT    = 8765;
 const N_L1       = 110;
-const N_L2       = 10;
+const N_DEC      = 16;
 const CVW        = 900;
 const WAVE_H     = 120;
 const DN_H       = 16;
 const NG_H       = 16;
 const RASTER_H   = 180;
-const L2_H       = 40;
+const DEC_H      = 48;
 const CTRL_H     = 60;
 const ROW_H      = RASTER_H / N_L1;
-const L2_ROW_H   = L2_H / N_L2;
+const DEC_ROW_H  = DEC_H / N_DEC;
+
+// DEC neuron color palette: neuron 0 = white (any-fire), 1–15 = rainbow
+const DEC_COLORS = ['#ffffff'];
+for (let i = 1; i < N_DEC; i++) {
+  const hue = ((i - 1) / (N_DEC - 1)) * 300; // 0=red → 300=magenta
+  DEC_COLORS.push(`hsl(${hue}, 100%, 60%)`);
+}
 
 // Network viz
 const NET_W = 360;
@@ -397,8 +405,8 @@ const ngCtx   = ngCv.getContext('2d');
 const rastCv  = document.getElementById('raster');
 const rastCtx = rastCv.getContext('2d');
 
-const l2Cv    = document.getElementById('l2_cv');
-const l2Ctx   = l2Cv.getContext('2d');
+const decCv   = document.getElementById('dec_cv');
+const decCtx  = decCv.getContext('2d');
 
 const ctrlCv  = document.getElementById('ctrl_cv');
 const ctrlCtx = ctrlCv.getContext('2d');
@@ -411,13 +419,14 @@ clearCv(waveCtx, CVW, WAVE_H);
 clearCv(dnCtx,   CVW, DN_H);
 clearCv(ngCtx,   CVW, NG_H);
 clearCv(rastCtx, CVW, RASTER_H);
-clearCv(l2Ctx,   CVW, L2_H);
+clearCv(decCtx,  CVW, DEC_H);
 clearCv(ctrlCtx, CVW, CTRL_H);
 clearCv(netCtx,  NET_W, NET_H);
 
 // ── Pending data from WebSocket ───────────────────────────────────────────────
 let pendingSpikes    = [];
-let pendingL2Spikes  = [];
+let pendingDECSpikes = [];
+let pendingDECHex    = '0x0000';
 let pendingSamples   = [];
 let pendingDNFlags   = [];
 let pendingControl   = 0;
@@ -425,7 +434,6 @@ let pendingNoiseGate = 1.0;
 let pendingInhActive = false;
 let pendingMembrane  = [];
 let hasNew           = false;
-let hasL2            = false;
 
 // Waveform state
 let waveMax = 1e-6;
@@ -437,7 +445,7 @@ let netDNActive = false;
 let netNGFactor = 1.0;
 let netInhActive = false;
 let netL1Spikes = new Set();
-let netL2Spikes = new Set();
+let netDECSpikes = new Set();
 
 function drawNetworkViz() {
   const ctx = netCtx;
@@ -570,46 +578,42 @@ function drawNetworkViz() {
     ctx.shadowBlur = 0;
   }
 
-  // ── L2/Decoder column (right) ──────────────────────────────
-  if (hasL2) {
-    ctx.fillStyle = '#444';
-    ctx.fillText('L2', colX[3], margin - 5);
-    for (let i = 0; i < N_L2; i++) {
-      const y = 60 + i * 35;
-      const fired = netL2Spikes.has(i);
-      ctx.beginPath();
-      ctx.arc(colX[3], y, 5, 0, Math.PI * 2);
-      ctx.fillStyle = fired ? '#00ccff' : '#0a1a2a';
-      if (fired) { ctx.shadowColor = '#00ccff'; ctx.shadowBlur = 10; }
-      ctx.fill();
-      ctx.shadowBlur = 0;
-      ctx.strokeStyle = '#00ccff';
-      ctx.lineWidth = 0.5;
-      ctx.stroke();
-    }
-  } else {
-    ctx.fillStyle = '#444';
-    ctx.fillText('DEC', colX[3], margin - 5);
+  // ── DEC column (right) — 16 spiking decoder neurons ────────
+  ctx.fillStyle = '#444';
+  ctx.fillText('DEC', colX[3], margin - 5);
 
-    // Decoder output indicator
-    const cv = Math.max(-1, Math.min(1, pendingControl));
-    const decY = 260;
+  // Neuron 0 = any-fire (white, larger), 1–15 = unit neurons (rainbow)
+  for (let i = 0; i < N_DEC; i++) {
+    const y = 40 + i * 28;
+    const fired = netDECSpikes.has(i);
+    const r = i === 0 ? 6 : 4;
+    const col = DEC_COLORS[i];
+    const dimCol = i === 0 ? '#1a1a1a' : `hsl(${((i-1)/(N_DEC-1))*300}, 30%, 12%)`;
+
     ctx.beginPath();
-    ctx.arc(colX[3], decY, 14, 0, Math.PI * 2);
-    const cIntensity = Math.abs(cv);
-    const cBlue = Math.floor(50 + cIntensity * 200);
-    ctx.fillStyle = `rgb(0, ${Math.floor(cIntensity * 100)}, ${cBlue})`;
-    if (cIntensity > 0.1) { ctx.shadowColor = '#00ccff'; ctx.shadowBlur = cIntensity * 15; }
+    ctx.arc(colX[3], y, r, 0, Math.PI * 2);
+    ctx.fillStyle = fired ? col : dimCol;
+    if (fired) { ctx.shadowColor = col; ctx.shadowBlur = 10; }
     ctx.fill();
     ctx.shadowBlur = 0;
-    ctx.strokeStyle = '#00ccff';
-    ctx.lineWidth = 1;
+    ctx.strokeStyle = col;
+    ctx.lineWidth = i === 0 ? 1.5 : 0.5;
     ctx.stroke();
 
-    ctx.fillStyle = '#00ccff';
-    ctx.font = '10px Courier New';
-    ctx.fillText(cv.toFixed(3), colX[3], decY + 28);
+    // Label neuron 0
+    if (i === 0) {
+      ctx.fillStyle = '#666';
+      ctx.font = '7px Courier New';
+      ctx.textAlign = 'left';
+      ctx.fillText('ANY', colX[3] + 10, y + 3);
+      ctx.textAlign = 'center';
+    }
   }
+
+  // Hex output below DEC neurons
+  ctx.fillStyle = '#00ccff';
+  ctx.font = '10px Courier New';
+  ctx.fillText(pendingDECHex, colX[3], 40 + N_DEC * 28 + 15);
 
   // ── Legend ─────────────────────────────────────────────────
   const legY = NET_H - 50;
@@ -621,7 +625,8 @@ function drawNetworkViz() {
     { color: '#ff33cc', label: 'Noise suppressing' },
     { color: '#ff3333', label: 'Inhibition active' },
     { color: '#00ff41', label: 'L1 spike' },
-    { color: '#00ccff', label: 'Control out' },
+    { color: '#ffffff', label: 'DEC any-fire' },
+    { color: '#00ccff', label: 'DEC unit' },
   ];
   legends.forEach((l, i) => {
     const x = 15;
@@ -749,16 +754,14 @@ function render() {
     }
   }
 
-  // ── L2 raster (if active) ─────────────────────────────────
-  if (hasL2) {
-    l2Ctx.drawImage(l2Cv, -N, 0);
-    l2Ctx.fillStyle = '#020202';
-    l2Ctx.fillRect(CVW - N, 0, N, L2_H);
-    l2Ctx.fillStyle = '#00ccff';
-    for (const id of pendingL2Spikes) {
-      if (id < N_L2) {
-        l2Ctx.fillRect(CVW - 2, id * L2_ROW_H, 2, Math.max(1, L2_ROW_H - 1));
-      }
+  // ── DEC raster (always visible, 16 neurons) ───────────────
+  decCtx.drawImage(decCv, -N, 0);
+  decCtx.fillStyle = '#020202';
+  decCtx.fillRect(CVW - N, 0, N, DEC_H);
+  for (const id of pendingDECSpikes) {
+    if (id < N_DEC) {
+      decCtx.fillStyle = DEC_COLORS[id];
+      decCtx.fillRect(CVW - 2, id * DEC_ROW_H, 2, Math.max(1, DEC_ROW_H - 1));
     }
   }
 
@@ -785,7 +788,7 @@ function render() {
   netNGFactor = pendingNoiseGate;
   netInhActive = pendingInhActive;
   netL1Spikes = new Set(pendingSpikes);
-  netL2Spikes = new Set(pendingL2Spikes);
+  netDECSpikes = new Set(pendingDECSpikes);
   if (pendingMembrane.length > 0) {
     for (let i = 0; i < Math.min(pendingMembrane.length, N_L1); i++) {
       netMembrane[i] = pendingMembrane[i];
@@ -796,7 +799,7 @@ function render() {
   pendingSamples = [];
   pendingDNFlags = [];
   pendingSpikes = [];
-  pendingL2Spikes = [];
+  pendingDECSpikes = [];
   requestAnimationFrame(render);
 }
 requestAnimationFrame(render);
@@ -992,14 +995,13 @@ function connect() {
     pendingMembrane  = msg.l1_membrane ?? [];
     hasNew = true;
 
-    // L2 spikes (show/hide L2 panel)
-    if (msg.l2_spikes !== undefined) {
-      pendingL2Spikes = msg.l2_spikes;
-      if (!hasL2) {
-        hasL2 = true;
-        document.getElementById('l2_label').style.display = '';
-        document.getElementById('l2_cv').style.display = '';
-      }
+    // DEC spikes (16 spiking decoder neurons)
+    if (msg.dec_spikes !== undefined) {
+      pendingDECSpikes = msg.dec_spikes;
+    }
+    if (msg.dec_hex !== undefined) {
+      pendingDECHex = msg.dec_hex;
+      document.getElementById('s_hex').textContent = msg.dec_hex;
     }
 
     const dnSum = pendingDNFlags.reduce((a, b) => a + b, 0);

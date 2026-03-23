@@ -53,14 +53,15 @@ raw electrode signal (80 kHz UDP / LSL / synthetic)
 └────────┬─────────┘
          │ l1_spikes [n_neurons]
          ▼
-┌──────────────────┐  (optional, gated by use_l2 flag)
-│ ClassificationL. │  10 LIF neurons + lateral inhibition + STDP
-│ output_layer.py  │  converges L1 patterns → unit identities
-└────────┬─────────┘
+┌──────────────────┐  (default: enabled, gated by use_dec flag)
+│  DECLayer        │  16 LIF neurons: neuron 0 = any-fire OR gate,
+│  dec_layer.py    │  neurons 1–15 learn unit identities via STDP
+└────────┬─────────┘  DN-gated, optional delay expansion
+         │ dec_spikes [16] + hex bitmask (uint16)
          ▼
 ┌──────────────────┐
 │ ControlDecoder   │  rate / population / trigger → (control, confidence)
-│ decoder.py       │  sends UDP control signal to experiment hardware
+│ decoder.py       │  sends UDP hex bitmask to experiment hardware
 └──────────────────┘
 ```
 
@@ -75,7 +76,7 @@ raw electrode signal (80 kHz UDP / LSL / synthetic)
 | `src/snn_agent/core/noise_gate.py` | Kalman noise suppressor | `NoiseGateConfig` | Parallel to DN. Suppresses L1 input when signal variance ≈ noise baseline. |
 | `src/snn_agent/core/inhibition.py` | Global post-spike inhibition | `InhibitionConfig` | 5 ms blanking after any L1 spike. Strong signals bypass. |
 | `src/snn_agent/core/template.py` | L1 template matching + STDP | `L1Config` | snnTorch `Leaky` with WTA. Weight matrix `W` shape: `[n_afferents, n_neurons]`. |
-| `src/snn_agent/core/output_layer.py` | L2 convergence (optional) | `L2Config` | Only active when `Config.use_l2=True`. Lateral inhibition + STDP. |
+| `src/snn_agent/core/dec_layer.py` | DEC spiking decoder (16 neurons) | `DECConfig` | Neuron 0 = DN-gated any-fire, neurons 1–15 = competitive STDP unit learners. Hex bitmask output. |
 | `src/snn_agent/core/decoder.py` | Control signal generation | `DecoderConfig` | Three strategies. Confidence from DN sliding window. |
 | `src/snn_agent/core/pipeline.py` | Factory: builds full chain | — | Two-phase: `build_pipeline()` (pre-calibration) → `complete_pipeline()` (post-calibration). |
 | `src/snn_agent/server/app.py` | Asyncio server + WebSocket | ports, broadcast_every | Three input modes: electrode/lsl/synthetic. WebSocket broadcasts pipeline state. |
@@ -97,7 +98,7 @@ raw electrode signal (80 kHz UDP / LSL / synthetic)
    - **Parameter tuning:** `dn_threshold`, `l1_stdp_ltp`, `l1_stdp_ltd`, `inh_duration_ms`, `inh_strength_threshold`, `ng_inhibit_below_sd`, `decoder_strategy`
    - **Source launching:** `launch_synthetic` (dict with optional `duration_s`, `num_units`, `noise_level`), `launch_file` (string path to .ncs), `get_status`, `list_files`
    - **Responses:** Server replies with `{"status": "ok", "mode": ...}` or `{"status": "error", "message": ...}`, and broadcasts `{"mode_change": {"mode": ..., "state": ...}}` to all clients.
-5. **Broadcast format** — JSON dict with `t`, `samples`, `dn_flags`, `spikes`, `control`, `confidence`. Extended fields: `noise_gate`, `inhibition_active`, `l1_membrane`, `l1_weights`, `l2_spikes`.
+5. **Broadcast format** — JSON dict with `t`, `samples`, `dn_flags`, `spikes`, `control`, `confidence`. Extended fields: `noise_gate`, `inhibition_active`, `l1_membrane`, `dec_spikes`, `dec_hex`.
 6. **Extension checklist** — when adding a new component:
    - Add its `*Config` dataclass to `config.py`
    - Add flat-key entries to `_FLAT_MAP`
@@ -110,7 +111,7 @@ raw electrode signal (80 kHz UDP / LSL / synthetic)
 ## Optuna Search Space
 
 Current: 8 parameters (DN threshold, L1 dn_weight, STDP ltp/ltd, encoder overlap/dvm_factor/step_size, L1 n_neurons).
-Extended: +5 parameters (inhibition duration/strength, noise gate process/measurement noise and inhibit_below_sd, L2 enable flag).
+Extended: +5 parameters (inhibition duration/strength, noise gate process/measurement noise and inhibit_below_sd, DEC enable flag).
 See `docs/optimization_manifest.yaml` for ranges and types.
 
 ## Dependencies

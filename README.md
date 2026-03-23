@@ -77,6 +77,7 @@ synthetic and file modes live from the browser.
 
 | Command | What it does |
 |---|---|
+|`snn-lsl data/raw/CSC285_0001.ncs`| Run the agent with the |
 | `snn-serve` | Start the agent server + browser GUI |
 | `snn-serve --mode synthetic` | Start with built-in synthetic signal |
 | `snn-lsl <ncs_path>` | Replay a `.ncs` file over Lab Streaming Layer |
@@ -179,7 +180,7 @@ snn-agent/
 │   │   ├── noise_gate.py           # Kalman noise suppressor
 │   │   ├── inhibition.py           # Global post-spike inhibition
 │   │   ├── template.py             # Template layer (L1) — 110 LIF + STDP
-│   │   ├── output_layer.py         # Classification layer (L2, optional)
+│   │   ├── dec_layer.py            # Spiking decoder layer (DEC, 16 neurons)
 │   │   ├── decoder.py              # Control decoder
 │   │   └── pipeline.py             # Factory: builds the full chain
 │   ├── server/

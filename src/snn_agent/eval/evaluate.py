@@ -93,7 +93,7 @@ def evaluate_pipeline(
     traces = recording.get_traces(segment_index=0)[:, 0]
     n_total = len(traces)
     l1_spike_log: dict[int, list[int]] = {}
-    l2_spike_log: dict[int, list[int]] = {}
+    dec_spike_log: dict[int, list[int]] = {}
     step_count = 0
     t0 = time.perf_counter()
     _early_exit = False
@@ -157,14 +157,14 @@ def evaluate_pipeline(
                 l1_spikes = pipeline_obj.template.step(afferents, dn_spike, suppression)
                 any_l1_fired_prev = bool(np.any(l1_spikes))
 
-                # Optional L2
+                # Optional DEC decoder layer
                 decoder_input = l1_spikes
-                if pipeline_obj.output_layer is not None:
-                    l2_spikes = pipeline_obj.output_layer.step(l1_spikes)
-                    for idx in np.flatnonzero(l2_spikes):
+                if pipeline_obj.dec_layer is not None:
+                    dec_spikes = pipeline_obj.dec_layer.step(l1_spikes, dn_spike)
+                    for idx in np.flatnonzero(dec_spikes):
                         nid = int(idx)
-                        l2_spike_log.setdefault(nid, []).append(frame_idx)
-                    decoder_input = l2_spikes
+                        dec_spike_log.setdefault(nid, []).append(frame_idx)
+                    decoder_input = dec_spikes
 
                 pipeline_obj.decoder.step(decoder_input, dn_spike)
 

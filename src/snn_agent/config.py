@@ -113,21 +113,30 @@ class NoiseGateConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class L2Config:
-    """Optional L2 classification / convergence layer."""
-    n_neurons: int = 10
-    tm_samples: int = 2
-    refractory_samples: int = 1
-    wi_factor: float = 10.0  # lateral inhibition strength (matches MATLAB L2_wiFactor)
-    threshold_factor: float = 0.15
+class DECConfig:
+    """Spiking decoder layer: 16 neurons (1 any-fire + 15 learned units).
+
+    Neuron 0 is a hard-wired OR gate (fires on any DN-gated L1 spike).
+    Neurons 1–15 learn putative unit identities via competitive STDP.
+    All neurons are DN-gated: they only integrate when DN is active.
+    Optional delay expansion gives a spatio-temporal receptive field.
+    """
+    n_neurons: int = 16
+    tm_samples: int = 10          # longer than L1 for temporal integration
+    refractory_samples: int = 4
+    any_fire_threshold: float = 0.5    # neuron 0 threshold (low → fires easily)
+    unit_threshold_factor: float = 0.4  # neurons 1–15 threshold = factor × n_l1
+    wi_factor: float = 8.0        # lateral inhibition strength for WTA
     init_w_min: float = 0.3
     init_w_max: float = 0.8
     w_lo: float = 0.0
     w_hi: float = 1.0
-    stdp_ltp: float = 0.01
-    stdp_ltp_window: int = 4
-    stdp_ltd: float = -0.005
+    stdp_ltp: float = 0.012
+    stdp_ltp_window: int = 6
+    stdp_ltd: float = -0.006
     freeze_stdp: bool = False
+    use_delays: bool = True       # toggle delay expansion
+    n_delay_taps: int = 16        # delay buffer depth (taps)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -165,10 +174,10 @@ class Config:
     synthetic: SyntheticConfig = field(default_factory=SyntheticConfig)
     inhibition: InhibitionConfig = field(default_factory=InhibitionConfig)
     noise_gate: NoiseGateConfig = field(default_factory=NoiseGateConfig)
-    l2: L2Config = field(default_factory=L2Config)
+    dec: DECConfig = field(default_factory=DECConfig)
 
     # Feature flags
-    use_l2: bool = False
+    use_dec: bool = True
 
     # Viz
     broadcast_every: int = 5
@@ -280,19 +289,22 @@ _FLAT_MAP: dict[str, tuple[str | None, str]] = {
     "ng_measurement_noise": ("noise_gate", "measurement_noise"),
     "ng_inhibit_below_sd": ("noise_gate", "inhibit_below_sd"),
     "ng_suppression_factor": ("noise_gate", "suppression_factor"),
-    # l2
-    "use_l2": (None, "use_l2"),
-    "l2_n_neurons": ("l2", "n_neurons"),
-    "l2_tm_samples": ("l2", "tm_samples"),
-    "l2_refractory_samples": ("l2", "refractory_samples"),
-    "l2_wi_factor": ("l2", "wi_factor"),
-    "l2_threshold_factor": ("l2", "threshold_factor"),
-    "l2_init_w_min": ("l2", "init_w_min"),
-    "l2_init_w_max": ("l2", "init_w_max"),
-    "l2_stdp_ltp": ("l2", "stdp_ltp"),
-    "l2_stdp_ltd": ("l2", "stdp_ltd"),
-    "l2_stdp_ltp_window": ("l2", "stdp_ltp_window"),
-    "l2_freeze_stdp": ("l2", "freeze_stdp"),
+    # dec
+    "use_dec": (None, "use_dec"),
+    "dec_n_neurons": ("dec", "n_neurons"),
+    "dec_tm_samples": ("dec", "tm_samples"),
+    "dec_refractory_samples": ("dec", "refractory_samples"),
+    "dec_any_fire_threshold": ("dec", "any_fire_threshold"),
+    "dec_unit_threshold_factor": ("dec", "unit_threshold_factor"),
+    "dec_wi_factor": ("dec", "wi_factor"),
+    "dec_init_w_min": ("dec", "init_w_min"),
+    "dec_init_w_max": ("dec", "init_w_max"),
+    "dec_stdp_ltp": ("dec", "stdp_ltp"),
+    "dec_stdp_ltd": ("dec", "stdp_ltd"),
+    "dec_stdp_ltp_window": ("dec", "stdp_ltp_window"),
+    "dec_freeze_stdp": ("dec", "freeze_stdp"),
+    "dec_use_delays": ("dec", "use_delays"),
+    "dec_n_delay_taps": ("dec", "n_delay_taps"),
 }
 
 
@@ -330,8 +342,8 @@ def _from_flat(flat: dict) -> Config:
         top["inhibition"] = InhibitionConfig(**subs["inhibition"])
     if "noise_gate" in subs:
         top["noise_gate"] = NoiseGateConfig(**subs["noise_gate"])
-    if "l2" in subs:
-        top["l2"] = L2Config(**subs["l2"])
+    if "dec" in subs:
+        top["dec"] = DECConfig(**subs["dec"])
 
     return Config(**top)
 

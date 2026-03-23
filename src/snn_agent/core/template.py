@@ -4,7 +4,7 @@
 # STDP: Global LTD on every post-spike + causal LTP for recent pre-spikes.
 # CONFIG: L1Config in config.py (n_neurons, dn_weight, stdp_ltp, stdp_ltd, etc.)
 # SEE ALSO: attention.py (dn_spike input), inhibition.py (post-spike blanking),
-#           noise_gate.py (noise suppression), output_layer.py (optional L2 downstream)
+#           noise_gate.py (noise suppression), dec_layer.py (DEC downstream)
 """
 snn_agent.core.template — L1 template-matching layer with competitive STDP.
 

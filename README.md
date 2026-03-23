@@ -1,5 +1,9 @@
 # ⚡ SNN Agent — Real-time Spiking Neural Network for Neural Signals
 
+<p align="center">
+  <img src="docs/assets/live_raster.png" alt="Live spike raster visualisation" width="900">
+</p>
+
 A streaming spiking neural network that detects and classifies extracellular
 action potentials in real time, derived from the
 [MB2018 ANNet](docs/reference/MB2018%20-%20ANNet/read_me.txt) architecture.

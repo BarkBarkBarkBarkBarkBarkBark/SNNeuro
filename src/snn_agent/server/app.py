@@ -746,6 +746,31 @@ async def _async_main(cfg: Config) -> None:
         await asyncio.Future()  # run forever
 
 
+_BEST_CONFIG_PATH = Path(__file__).resolve().parent.parent.parent.parent / "data" / "best_config.json"
+
+
+def _load_optimized_config() -> Config | None:
+    """Load best_config.json and return a Config built from its parameters.
+
+    Returns ``None`` if the file doesn't exist or can't be parsed.
+    """
+    if not _BEST_CONFIG_PATH.exists():
+        return None
+    try:
+        with open(_BEST_CONFIG_PATH) as f:
+            data = json.load(f)
+        params = data.get("parameters", {})
+        if not params:
+            return None
+        # Strip non-config keys that the optimizer stores inside "parameters"
+        params = {k: v for k, v in params.items()
+                  if k not in ("f_half", "accuracy", "precision", "recall")}
+        return Config.from_flat(params)
+    except Exception as exc:  # noqa: BLE001
+        print(f"⚠  Could not load {_BEST_CONFIG_PATH}: {exc}")
+        return None
+
+
 def main() -> None:
     """CLI entry point (``snn-serve``)."""
     import argparse
@@ -759,9 +784,28 @@ def main() -> None:
         default=None,
         help="Input source mode (default: from config)",
     )
+    parser.add_argument(
+        "--no-optimized",
+        action="store_true",
+        default=False,
+        help="Ignore data/best_config.json and use built-in defaults",
+    )
     args = parser.parse_args()
 
-    cfg = DEFAULT_CONFIG
+    # ── Build config: optimized params → CLI overrides ────────────────────
+    if not args.no_optimized:
+        optimized = _load_optimized_config()
+    else:
+        optimized = None
+
+    if optimized is not None:
+        cfg = optimized
+        print(f"✓  Loaded optimized hyperparameters from {_BEST_CONFIG_PATH.name}")
+    else:
+        cfg = DEFAULT_CONFIG
+        if not args.no_optimized:
+            print("ℹ  No optimized config found — using built-in defaults")
+
     if args.mode:
         cfg = cfg.with_overrides(mode=args.mode)
 

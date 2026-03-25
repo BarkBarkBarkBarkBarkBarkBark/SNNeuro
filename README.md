@@ -46,8 +46,14 @@ electrode → filter → encode → detect + gate → inhibit → sort → ident
 7. **Identify** — A 16-neuron DEC layer learns to associate template
    responses with distinct neural units.  Neuron 0 is a simple spike
    detector; neurons 1–15 learn unit identities via STDP.
-8. **Decode** — Sorted spikes are converted into a control signal you can
-   send to your experiment hardware in real time.
+8. **Decode** — Sorted spikes are converted into an output signal.  Five
+   strategies are available:
+   - **discrete** (default) — clean 1/0 per time step, ideal for spike sorting
+   - **TTL** — fixed-width digital pulse (configurable width and level),
+     suitable for driving hardware trigger lines
+   - **trigger** — decaying exponential pulse with natural falloff
+   - **rate** — sliding-window firing rate for continuous BCI control
+   - **population** — leaky integrator with threshold crossing
 
 Everything runs at 20 kHz with results streaming live to your browser.
 
@@ -107,7 +113,9 @@ The live dashboard runs at `http://localhost:8080` and shows:
 - **Network topology** — animated diagram showing which neurons are firing,
   the noise gate state, and inhibition activity
 - **Tunable parameters** — adjust DN threshold, STDP learning rates,
-  inhibition, noise gate sensitivity, and decoder strategy live
+  inhibition, noise gate sensitivity, and output strategy live
+- **Output control** — switch between discrete / TTL / trigger / rate /
+  population strategies; configure TTL pulse width and level
 
 ## Architecture at a glance
 

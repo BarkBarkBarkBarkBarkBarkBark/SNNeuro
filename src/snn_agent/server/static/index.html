@@ -352,14 +352,26 @@ canvas {
   </div>
 
   <div class="ctrl-group">
-    <div class="ctrl-title">Decoder</div>
+    <div class="ctrl-title">Output Control</div>
     <div class="ctrl-row">
       <label>Strategy</label>
       <select id="decoder_sel">
-        <option value="rate" selected>rate</option>
+        <option value="discrete" selected>discrete</option>
+        <option value="ttl">TTL pulse</option>
+        <option value="trigger">trigger (decay)</option>
+        <option value="rate">rate</option>
         <option value="population">population</option>
-        <option value="trigger">trigger</option>
       </select>
+    </div>
+    <div class="ctrl-row" id="ttl_width_row">
+      <label>TTL width (ms)</label>
+      <input type="range" id="ttl_width_slider" min="0.1" max="10" step="0.1" value="1.0">
+      <span class="ctrl-val" id="ttl_width_val">1.0</span>
+    </div>
+    <div class="ctrl-row" id="ttl_high_row">
+      <label>TTL level</label>
+      <input type="range" id="ttl_high_slider" min="0.1" max="1.0" step="0.05" value="1.0">
+      <span class="ctrl-val" id="ttl_high_val">1.0</span>
     </div>
   </div>
 </div>
@@ -887,10 +899,37 @@ ngSdSlider.addEventListener('input', () => {
   sendCmd('ng_inhibit_below_sd', v);
 });
 
-// Decoder strategy select
+// Decoder strategy select + TTL controls
 const decSel = document.getElementById('decoder_sel');
+const ttlWidthRow = document.getElementById('ttl_width_row');
+const ttlHighRow = document.getElementById('ttl_high_row');
+function updateTTLVisibility() {
+  const isTTL = decSel.value === 'ttl';
+  ttlWidthRow.style.display = isTTL ? '' : 'none';
+  ttlHighRow.style.display = isTTL ? '' : 'none';
+}
+updateTTLVisibility();
 decSel.addEventListener('change', () => {
   sendCmd('decoder_strategy', decSel.value);
+  updateTTLVisibility();
+});
+
+// TTL pulse width slider
+const ttlWSlider = document.getElementById('ttl_width_slider');
+const ttlWVal = document.getElementById('ttl_width_val');
+ttlWSlider.addEventListener('input', () => {
+  const v = parseFloat(ttlWSlider.value);
+  ttlWVal.textContent = v.toFixed(1);
+  sendCmd('ttl_width_ms', v);
+});
+
+// TTL high-level slider
+const ttlHSlider = document.getElementById('ttl_high_slider');
+const ttlHVal = document.getElementById('ttl_high_val');
+ttlHSlider.addEventListener('input', () => {
+  const v = parseFloat(ttlHSlider.value);
+  ttlHVal.textContent = v.toFixed(2);
+  sendCmd('ttl_high', v);
 });
 
 // ── Source launcher controls ──────────────────────────────────────────────────

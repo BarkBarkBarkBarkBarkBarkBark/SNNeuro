@@ -155,6 +155,17 @@ async def ws_handler(websocket) -> None:
                     dec = pipeline_refs.get("decoder")
                     if dec is not None:
                         dec.strategy = str(data["decoder_strategy"])
+                # TTL pulse width (ms)
+                if "ttl_width_ms" in data:
+                    dec = pipeline_refs.get("decoder")
+                    if dec is not None:
+                        fs = pipeline_refs.get("effective_fs", 20000)
+                        dec._ttl_width_samples = max(1, int(float(data["ttl_width_ms"]) * 1e-3 * fs))
+                # TTL high level (0–1)
+                if "ttl_high" in data:
+                    dec = pipeline_refs.get("decoder")
+                    if dec is not None:
+                        dec._ttl_high = float(data["ttl_high"])
                 # ── Source launch commands ─────────────────────────
                 if "launch_synthetic" in data:
                     params = data["launch_synthetic"]

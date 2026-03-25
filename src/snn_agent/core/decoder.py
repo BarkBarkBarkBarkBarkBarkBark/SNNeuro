@@ -1,8 +1,10 @@
 # AGENT-HINT: Control signal decoder for closed-loop BCI experiments.
-# PURPOSE: Converts L1 (or L2 if enabled) spike activity → scalar control signal.
-# STRATEGIES: "rate" (sliding window), "population" (leaky integrator), "trigger" (binary).
+# PURPOSE: Converts L1 (or DEC) spike activity → scalar control signal.
+# STRATEGIES: "discrete" (1/0 per step), "ttl" (fixed-width pulse),
+#             "rate" (sliding window), "population" (leaky integrator),
+#             "trigger" (decaying pulse).
 # CONFIDENCE: Sliding-window average of DN spike activity.
-# CONFIG: DecoderConfig in config.py (strategy, window_ms, threshold, etc.)
+# CONFIG: DecoderConfig in config.py (strategy, window_ms, threshold, ttl_*, etc.)
 # SEE ALSO: template.py (L1 spikes), dec_layer.py (DEC spikes), app.py (UDP output)
 """
 snn_agent.core.decoder — Control signal decoder for closed-loop experiments.
@@ -11,13 +13,16 @@ Converts L1 (TemplateLayer) spike activity into a scalar control signal
 suitable for driving a stimulation controller or other experiment hardware.
 
 Strategies:
+    ``"discrete"``   — Clean 1/0 per time step: 1 if any spike + DN, else 0.
+    ``"ttl"``        — Fixed-width TTL pulse: goes high for ``ttl_width_ms``
+                       after a spike+DN event, then drops to 0.
     ``"rate"``       — Sliding-window spike rate → weighted sum.
     ``"population"`` — Leaky integrator; emits on threshold crossing.
-    ``"trigger"``    — Binary pulse on any L1 spike + DN active.
+    ``"trigger"``    — Decaying pulse on any L1 spike + DN active.
 
 All strategies compute a **confidence** value (0–1) from recent DN activity.
 
-Output: ``(control_value, confidence)`` or ``None``.
+Output: ``(control_value, confidence)``.
 """
 
 from __future__ import annotations
@@ -35,8 +40,6 @@ class ControlDecoder:
     """Converts L1 spike vectors + DN activity into a control signal.
 
     All strategies *always* return ``(control, confidence)`` — never ``None``.
-    The ``control`` value is a continuous signal in [-1, 1] suitable for both
-    visualisation and closed-loop output.
     """
 
     def __init__(self, cfg: Config, n_l1: int) -> None:
@@ -73,6 +76,11 @@ class ControlDecoder:
         self._trigger_val = 0.0
         self._trigger_decay = self._pop_decay  # reuse same time constant
 
+        # TTL strategy — fixed-width digital pulse
+        self._ttl_width_samples = max(1, int(dec.ttl_width_ms * 1e-3 * self._fs))
+        self._ttl_high = float(dec.ttl_high)
+        self._ttl_countdown: int = 0  # samples remaining in current pulse
+
         # DN confidence — sliding window
         dn_win = int(dec.dn_confidence_window_ms * 1e-3 * self._fs)
         self._dn_buf: deque[bool] = deque(maxlen=max(dn_win, 1))
@@ -92,7 +100,11 @@ class ControlDecoder:
         self._dn_buf.append(dn_spike)
         confidence = sum(self._dn_buf) / len(self._dn_buf)
 
-        if self.strategy == "rate":
+        if self.strategy == "discrete":
+            return self._step_discrete(l1_spikes, dn_spike, confidence)
+        elif self.strategy == "ttl":
+            return self._step_ttl(l1_spikes, dn_spike, confidence)
+        elif self.strategy == "rate":
             return self._step_rate(l1_spikes, confidence)
         elif self.strategy == "population":
             return self._step_population(l1_spikes, confidence)
@@ -102,6 +114,26 @@ class ControlDecoder:
             raise ValueError(f"Unknown ctrl_strategy: {self.strategy!r}")
 
     # ── strategies ────────────────────────────────────────────────────
+    def _step_discrete(
+        self, spikes: np.ndarray, dn_spike: bool, confidence: float
+    ) -> tuple[float, float]:
+        """Clean 1/0: fires exactly on the step a spike+DN event occurs."""
+        if np.any(spikes) and dn_spike:
+            return (1.0, confidence)
+        return (0.0, confidence)
+
+    def _step_ttl(
+        self, spikes: np.ndarray, dn_spike: bool, confidence: float
+    ) -> tuple[float, float]:
+        """Fixed-width TTL pulse: goes high for ttl_width_ms, then low."""
+        # New event restarts the pulse (extends if already high)
+        if np.any(spikes) and dn_spike:
+            self._ttl_countdown = self._ttl_width_samples
+        if self._ttl_countdown > 0:
+            self._ttl_countdown -= 1
+            return (self._ttl_high, confidence)
+        return (0.0, confidence)
+
     def _step_rate(
         self, spikes: np.ndarray, confidence: float
     ) -> tuple[float, float]:

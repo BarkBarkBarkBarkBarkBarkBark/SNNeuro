@@ -67,13 +67,16 @@ class L1Config:
 
 @dataclass(frozen=True, slots=True)
 class DecoderConfig:
-    strategy: Literal["rate", "population", "trigger"] = "population"
+    strategy: Literal["discrete", "ttl", "rate", "population", "trigger"] = "discrete"
     window_ms: float = 25.0
     weights: list[float] | None = None
     threshold: float = 3.0
     leaky_tau_ms: float = 10.0
     dn_confidence_window_ms: float = 50.0
     max_rate_hz: float = 100.0   # normalisation ceiling for rate strategy
+    # TTL pulse parameters
+    ttl_width_ms: float = 1.0    # pulse duration in ms (typical: 0.5–5.0)
+    ttl_high: float = 1.0        # output level when pulse is HIGH (0–1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,6 +272,8 @@ _FLAT_MAP: dict[str, tuple[str | None, str]] = {
     "ctrl_leaky_tau_ms": ("decoder", "leaky_tau_ms"),
     "ctrl_dn_confidence_window_ms": ("decoder", "dn_confidence_window_ms"),
     "ctrl_max_rate_hz": ("decoder", "max_rate_hz"),
+    "ctrl_ttl_width_ms": ("decoder", "ttl_width_ms"),
+    "ctrl_ttl_high": ("decoder", "ttl_high"),
     # lsl
     "lsl_stream_name": ("lsl", "stream_name"),
     "lsl_pick_channel": ("lsl", "pick_channel"),

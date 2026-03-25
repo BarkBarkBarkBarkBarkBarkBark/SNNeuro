@@ -98,7 +98,7 @@ raw electrode signal (80 kHz UDP / LSL / synthetic)
 2. **Flat-key mapping** — `_FLAT_MAP` in config.py translates `"l1_n_neurons"` ↔ `L1Config.n_neurons`. Add entries for new params.
 3. **Pipeline is two-phase** — encoder must calibrate before downstream stages can be built (they need `n_afferents`).
 4. **WebSocket commands** — browser sends JSON `{"key": value}` → `ws_handler()` in app.py dispatches. Add new command handlers there.
-   - **Parameter tuning:** `dn_threshold`, `l1_stdp_ltp`, `l1_stdp_ltd`, `inh_duration_ms`, `inh_strength_threshold`, `ng_inhibit_below_sd`, `decoder_strategy`
+   - **Parameter tuning:** `dn_threshold`, `l1_stdp_ltp`, `l1_stdp_ltd`, `inh_duration_ms`, `inh_strength_threshold`, `ng_inhibit_below_sd`, `decoder_strategy`, `ttl_width_ms`, `ttl_high`
    - **Source launching:** `launch_synthetic` (dict with optional `duration_s`, `num_units`, `noise_level`), `launch_file` (string path to .ncs), `get_status`, `list_files`
    - **Responses:** Server replies with `{"status": "ok", "mode": ...}` or `{"status": "error", "message": ...}`, and broadcasts `{"mode_change": {"mode": ..., "state": ...}}` to all clients.
 5. **Broadcast format** — JSON dict with `t`, `samples`, `dn_flags`, `spikes`, `control`, `confidence`. Extended fields: `noise_gate`, `inhibition_active`, `l1_membrane`, `dec_spikes`, `dec_hex`.

@@ -36,6 +36,7 @@ snn-optimize = "snn_agent.eval.optimize:main"
 snn-lsl = "snn_agent.io.lsl_player:main"
 snn-test-electrode = "snn_agent.io.test_electrode:main"
 snn-ground-truth = "snn_agent.eval.ground_truth:main"
+snn-genetic = "snn_agent.eval.genetic:main"
 
 [build-system]
 requires = ["hatchling"]

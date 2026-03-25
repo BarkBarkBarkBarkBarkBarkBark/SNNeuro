@@ -71,7 +71,7 @@ class NoiseGateNeuron:
         self.P = 1.0                    # estimate covariance
 
         # Exponential moving average for smoother gating
-        self._ema_alpha = 0.05
+        self._ema_alpha = ng.ema_alpha
         self._ema_suppression = 1.0
 
         # Public state for monitoring

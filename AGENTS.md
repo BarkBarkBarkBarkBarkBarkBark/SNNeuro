@@ -11,8 +11,9 @@ uv venv && source .venv/bin/activate
 uv pip install -e ".[eval,dev]"
 snn-serve                    # launch live server (http://localhost:8080)
 snn-serve --mode synthetic   # start with synthetic signal
-snn-evaluate                 # offline accuracy benchmark
-snn-optimize                 # Optuna hyperparameter search
+snn-evaluate                 # offline accuracy benchmark (single scenario)
+snn-optimize                 # Optuna TPE hyperparameter search (Stage 1)
+snn-genetic                  # genetic crossover optimizer (Stage 2)
 ```
 
 ## Architecture Overview
@@ -81,13 +82,15 @@ raw electrode signal (80 kHz UDP / LSL / synthetic)
 | `src/snn_agent/core/pipeline.py` | Factory: builds full chain | — | Two-phase: `build_pipeline()` (pre-calibration) → `complete_pipeline()` (post-calibration). |
 | `src/snn_agent/server/app.py` | Asyncio server + WebSocket | ports, broadcast_every | Three input modes: electrode/lsl/synthetic. WebSocket broadcasts pipeline state. |
 | `src/snn_agent/server/static/index.html` | Browser GUI | — | Canvas2D + D3.js network viz. Sliders send WebSocket commands. |
-| `src/snn_agent/eval/evaluate.py` | Offline benchmark | — | Runs pipeline sample-by-sample against SpikeInterface ground truth. |
-| `src/snn_agent/eval/optimize.py` | Optuna TPE search | — | Reads `docs/optimization_manifest.yaml` for search space definition. |
-| `docs/optimization_manifest.yaml` | Search space definition | — | Add new tunable parameters here to include them in Optuna search. |
+| `src/snn_agent/eval/evaluate.py` | Offline benchmark + multi-scenario eval | — | `evaluate_pipeline()` single run; `multi_evaluate()` averages over 4 scenarios with train/test split. |
+| `src/snn_agent/eval/optimize.py` | Stage 1: Optuna TPE search | — | Reads `docs/optimization_manifest.yaml`. Uses `multi_evaluate()` with F₀.₅ objective. |
+| `src/snn_agent/eval/genetic.py` | Stage 2: Genetic crossover optimizer | — | Breeds top-K trials via block-level crossover + mutation. Uses same `multi_evaluate()`. |
+| `docs/optimization_manifest.yaml` | Search space + eval config | — | 17 tunable params, 4 evaluation scenarios, F₀.₅ metric, train/test split. |
+| `docs/optimization_guide.md` | **Full optimization reference** | — | Methodology, metrics, gene blocks, interpretation, extension guide. |
 | `docs/annet_architecture.yaml` | Original ANNet design doc | — | 818-line reference covering MATLAB→Python porting decisions. |
-| `docs/scientific_principles.md` | **Full math + pseudocode + audit** | — | Merged scientific reference: LaTeX, pseudocode, plain English, 14 audited claims. |
+| `docs/scientific_principles.md` | **Full math + pseudocode + audit** | — | Merged scientific reference: LaTeX, pseudocode, plain English, 18 audited claims. |
 | `docs/manifesto.json` | Machine-readable project contract | — | I/O protocols, file roles, extension points. |
-| `data/best_config.json` | Current best hyperparameters | — | Trial 65: accuracy=0.733, 110 neurons, 81 active. |
+| `data/best_config.json` | Current best hyperparameters | — | Updated by optimizer runs. Contains params, score, and all metrics. |
 
 ## Key Conventions for Agents
 
@@ -108,13 +111,30 @@ raw electrode signal (80 kHz UDP / LSL / synthetic)
    - Add search params to `docs/optimization_manifest.yaml`
    - Document in `docs/scientific_principles.md` (math + pseudocode + plain English)
 
-## Optuna Search Space
+## Optimization
 
-Current: 8 parameters (DN threshold, L1 dn_weight, STDP ltp/ltd, encoder overlap/dvm_factor/step_size, L1 n_neurons).
-Extended: +5 parameters (inhibition duration/strength, noise gate process/measurement noise and inhibit_below_sd, DEC enable flag).
+Two-stage workflow. See `docs/optimization_guide.md` for full reference.
+
+**Stage 1 — Optuna TPE:** `snn-optimize --n-trials 80`
+**Stage 2 — Genetic:**   `snn-genetic --top-k 10 --n-offspring 160`
+
+**Evaluation methodology:**
+- 4 synthetic scenarios (varied seed, noise, unit count, firing rates)
+- Train/test temporal split (STDP learns 0–15 s, scored on 15–20 s)
+- `delta_time=2.0 ms` spike matching (5× tighter than original 10 ms)
+- F₀.₅ objective (precision weighted 2× over recall)
+
+**Search space:** 17 parameters across 6 groups:
+- Encoder: `enc_overlap`, `enc_dvm_factor`, `enc_step_size`
+- DN: `dn_threshold_factor`, `l1_dn_weight`, `dn_depression_tau`, `dn_depression_frac`
+- L1/STDP: `l1_stdp_ltp`, `l1_stdp_ltd`, `l1_n_neurons`
+- Inhibition: `inh_duration_ms`, `inh_strength_threshold`
+- Noise gate: `ng_process_noise`, `ng_inhibit_below_sd`, `ng_suppression_factor`, `ng_ema_alpha`
+- DEC: `dec_dn_window_ms`
+
 See `docs/optimization_manifest.yaml` for ranges and types.
 
 ## Dependencies
 - **Core**: numpy, scipy, torch, snntorch, websockets, pyyaml
 - **Eval** (optional): spikeinterface, optuna
-- **LSL** (optional): mne-lsl, neo
+- **LSL** (optional): mne, mne-lsl

@@ -139,6 +139,11 @@ class DECLayer:
         # Pre-allocated buffers
         self._x_buf = torch.zeros(self.n_input, dtype=torch.float32)
 
+        # DN integration window (keep gate open N samples after DN spike)
+        _efs = cfg.effective_fs()
+        self._dn_window_samples = max(1, int(dc.dn_window_ms * 1e-3 * _efs))
+        self._dn_countdown: int = 0
+
         # Output cache
         self._last_hex: int = 0
 
@@ -169,8 +174,12 @@ class DECLayer:
         # ── Update delay buffer ───────────────────────────────────────
         self._delay_buf.append(l1_spikes.astype(bool).copy())
 
-        # ── DN gate: skip all integration if DN is not active ─────────
-        if not dn_spike:
+        # ── DN gate: integrate while DN is active or within post-DN window ──
+        if dn_spike:
+            self._dn_countdown = self._dn_window_samples
+        elif self._dn_countdown > 0:
+            self._dn_countdown -= 1
+        else:
             self._last_hex = 0
             return out
 

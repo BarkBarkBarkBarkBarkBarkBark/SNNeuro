@@ -19,10 +19,11 @@
 5. [Synaptic Plasticity (STDP)](#5-synaptic-plasticity-stdp)
 6. [Noise Gate (Kalman Filter)](#6-noise-gate-kalman-filter)
 7. [Global Inhibition](#7-global-inhibition)
-8. [Classification Layer (L2)](#8-classification-layer-l2)
-9. [Control Decoder](#9-control-decoder)
-10. [References](#10-references)
-11. [Scientific Claims Audit Summary](#11-scientific-claims-audit-summary)
+8. [DEC Layer (Spiking Decoder)](#8-dec-layer-spiking-decoder)
+9. [Classification Layer (L2)](#9-classification-layer-l2)
+10. [Control Decoder](#10-control-decoder)
+11. [References](#11-references)
+12. [Scientific Claims Audit Summary](#12-scientific-claims-audit-summary)
 
 ---
 
@@ -160,10 +161,6 @@ acts as a frequency/amplitude channel.
   MAD formula for extracellular noise estimation.
 - Thorpe, Delorme & Van Rullen (2001) — *Spike-based strategies for rapid
   processing.* Establishes the framework of rank-order and first-spike coding.
-
-⚠️ **Caveat:** A post-calibration EMA tracks `|x_t|` but is never used
-downstream — `dvm` and `centres` are fixed at calibration time. Consider
-removing the unused EMA or wiring it for adaptive bin updates.
 
 ### Implementation
 
@@ -581,52 +578,158 @@ during the blanking window.
 
 ---
 
-## 8. Classification Layer (L2)
+## 8. DEC Layer (Spiking Decoder)
 
 ### In plain English
 
-The optional L2 layer sits on top of the template layer and learns to group
-template neurons into clusters that represent the same neural unit. While L1
-neurons specialise on individual waveform *phases* or *shapes*, L2 neurons
-learn to recognise that certain sets of L1 responses always occur together
-and therefore belong to the same neuron.
+The DEC layer sits between the template layer (L1) and the control decoder.
+It has 16 spiking neurons that learn to associate specific L1 firing
+patterns with distinct neural units.
 
-Think of L1 as recognising individual words and L2 as recognising sentences —
-it spots patterns in the patterns.
+- **Neuron 0** is a hard-wired OR gate: it fires whenever *any* L1 neuron
+  fires while the attention neuron is active. This provides a simple
+  "spike detected" signal with no learning.
+- **Neurons 1–15** are competitive learners: they use STDP (the same
+  learning rule as L1) to specialise on different L1 spike patterns.
+  Over time, each neuron learns to fire only when a particular neural
+  unit is active.
 
-This layer uses the same competitive learning (STDP + WTA) as L1, plus
-stronger lateral inhibition to enforce sharper competition between the 10
-output neurons.
+All DEC neurons are **attention-gated** — they only integrate input when
+the DN has recently fired. This prevents noise-driven L1 spikes from
+reaching the decoder. The gate stays open for a configurable window
+(default 2.5 ms) after each DN spike, allowing temporally nearby L1
+spikes to pass through.
+
+The layer's output is a 16-bit hexadecimal bitmask where each bit
+represents one DEC neuron. This bitmask is broadcast via WebSocket and
+sent via UDP to experiment hardware.
 
 ### How it works
 
 ```
-for each l1_spike_vector:
-    current = l1_spikes @ W_l2    # feed-forward
-    # Amplify competition via lateral inhibition factor
-    current = mean(current) + (current - mean(current)) × wi_factor
+for each timestep:
+    if dn_spike:
+        dn_countdown = dn_window_samples    # open the gate
 
+    if dn_countdown > 0:
+        dn_countdown -= 1
+        gate_open = True
+    else:
+        gate_open = False
+
+    if not gate_open:
+        emit zeros (16-element vector)
+        return
+
+    # Neuron 0: OR gate
+    if any(l1_spikes):
+        dec_spikes[0] = 1
+
+    # Neurons 1–15: LIF + competitive STDP
+    current = l1_spikes @ W_dec        # feed-forward drive
+    current += WTA_inhibition           # lateral competition
     membrane = β × membrane + current
-    winner = WTA(membrane, threshold)
-    if winner: apply STDP to winner's weights
+    spikes = threshold_check(membrane)
+    if any(spikes):
+        apply STDP to winner's weights
+
+    # Build bitmask
+    hex_mask = Σ (2^i × dec_spikes[i]) for i in 0..15
+    emit dec_spikes, hex_mask
 ```
+
+### The mathematics
+
+**DN-gated integration window:**
+
+$$T_{\mathrm{gate}} = \lfloor \Delta t_{\mathrm{DN}} \times 10^{-3} \times f_s \rfloor \text{ samples}$$
+
+where $\Delta t_{\mathrm{DN}}$ = `dec.dn_window_ms`. The gate opens on each
+DN spike and counts down to zero.
+
+**Feed-forward current (neurons 1–15):**
+
+$$I_i = \sum_{j=1}^{N_{L1}} W_{j,i} \cdot s_j^{L1}$$
+
+**WTA lateral inhibition:**
+
+$$I_i' = \bar{I} + (I_i - \bar{I}) \times \kappa$$
+
+where $\kappa$ = `dec.wi_factor` (default 8.0) amplifies the difference
+between each neuron's current and the mean, enforcing winner-take-all.
+
+**LIF membrane dynamics:**
+
+$$V_{i,t} = \beta \cdot V_{i,t-1} + I_i', \quad \beta = e^{-1/\tau_m}$$
+
+**Hex bitmask:**
+
+$$\mathrm{mask} = \sum_{i=0}^{15} 2^i \cdot s_i^{\mathrm{DEC}}$$
+
+**STDP:** Same asymmetric global-LTD / causal-LTP rule as L1 (Section 5),
+with independently configurable rates (`dec.stdp_ltp`, `dec.stdp_ltd`).
 
 ### Scientific basis
 
-The L2 architecture mirrors the MATLAB ANNet Output_Layer (10 neurons,
-`wiFactor=10`). Lateral inhibition via amplified WTA competition is a
-standard mechanism for forcing discrete categorisation in neural networks.
+✅ **Sound.** The DEC layer implements a standard hierarchical competitive
+learning architecture: L1 learns low-level features (waveform shapes), DEC
+learns higher-level associations (which combinations of L1 responses
+correspond to the same neural unit). This mirrors the L1→L2 hierarchy in
+the original MATLAB ANNet architecture.
+
+The DN-gated integration window is a pragmatic engineering choice that
+addresses a timing problem: the DN fires slightly before L1 completes its
+template matching (typically ~1–3 ms gap). The window keeps the gate open
+long enough for the corresponding L1 spikes to arrive.
+
+⚠️ **Caveat:** The hard-wired OR gate (neuron 0) bypasses learning entirely.
+It serves as a reliable "any spike detected" signal for simple control
+tasks but does not discriminate between neural units.
 
 ### Implementation
 
-- **File:** `core/output_layer.py` → `ClassificationLayer`
-- **Config:** `L2Config` — `n_neurons`, `wi_factor`, `threshold_factor`,
-  STDP params
-- **Feature flag:** `Config.use_l2 = True` to enable
+- **File:** `core/dec_layer.py` → `DECLayer`
+- **Config:** `DECConfig` — `n_neurons`, `tm_samples`, `any_fire_threshold`,
+  `unit_threshold_factor`, `wi_factor`, `dn_window_ms`, STDP rates
+- **Feature flag:** `Config.use_dec = True` to enable
+- **Optional:** Delay expansion (`dec.use_delays = True`) adds a temporal
+  delay buffer giving DEC neurons a spatio-temporal receptive field over
+  L1 spike history.
 
 ---
 
-## 9. Control Decoder
+## 9. Classification Layer (L2) — *Legacy*
+
+> ⚠️ **This component is vestigial.** The L2 classification layer from the
+> original MATLAB ANNet architecture has been superseded by the **DEC layer**
+> (Section 8), which provides DN-gated hierarchical competitive learning
+> with 16 neurons. The file `core/output_layer.py` remains in the codebase
+> for reference but is **not wired into the active pipeline**.
+
+### Original design
+
+The L2 layer sat on top of the template layer and grouped template neurons
+into clusters representing the same neural unit. It used 10 neurons with
+competitive STDP + WTA and stronger lateral inhibition (`wi_factor=10`) to
+enforce sharper competition.
+
+### Why it was replaced
+
+The DEC layer improves on L2 in two key ways:
+1. **DN gating** — DEC only integrates L1 spikes when the attention neuron
+   is active, preventing noise-driven L1 activity from contaminating the
+   unit identification.
+2. **Hard-wired detector** — Neuron 0 provides a guaranteed "any spike"
+   detection signal without depending on learned weights.
+
+### Implementation
+
+- **File:** `core/output_layer.py` → `ClassificationLayer` (not imported
+  by `pipeline.py`)
+
+---
+
+## 10. Control Decoder
 
 ### In plain English
 
@@ -703,7 +806,7 @@ denominator grows from 1, making early values noisy.
 
 ---
 
-## 10. References
+## 11. References
 
 1. Donoho, D.L. & Johnstone, I.M. (1994). *Ideal spatial adaptation by
    wavelet shrinkage.* Biometrika 81(3): 425–455.
@@ -732,7 +835,7 @@ denominator grows from 1, making early values noisy.
 
 ---
 
-## 11. Scientific Claims Audit Summary
+## 12. Scientific Claims Audit Summary
 
 Every major scientific claim in the codebase has been evaluated against the
 literature and the implementation. Full details of each audit are inline
@@ -748,12 +851,16 @@ above.
 | 6 | L1 | Threshold derivation (k=3) | ✅ Sound (k hardcoded) |
 | 7 | L1 | Asymmetric STDP (global LTD + causal LTP) | ✅ Sound |
 | 8 | L1 | WTA via snnTorch inhibition | ⚠️ snnTorch stability caveat |
-| 9 | Decoder | Rate — sliding-window weighted sum | ✅ Sound |
-| 10 | Decoder | Population — leaky integrator | ✅ Sound |
-| 11 | Decoder | DN confidence = sliding-window average | ⚠️ Heuristic, not Bayesian |
-| 12 | Pipeline | Biologically-inspired architecture | ✅ Sound (engineering abstraction) |
-| 13 | L1 | snnTorch LIF zero reset mechanism | ✅ Sound |
-| 14 | Preprocessor | SOS causal bandpass filter | ✅ Sound |
+| 9 | Noise gate | 1-D Kalman variance tracker | ✅ Sound |
+| 10 | Inhibitor | Post-spike blanking with strong-signal bypass | ✅ Sound |
+| 11 | DEC | DN-gated hierarchical competitive STDP | ✅ Sound |
+| 12 | DEC | Hard-wired OR gate (neuron 0) | ⚠️ No learning — engineering choice |
+| 13 | Decoder | Rate — sliding-window weighted sum | ✅ Sound |
+| 14 | Decoder | Population — leaky integrator | ✅ Sound |
+| 15 | Decoder | DN confidence = sliding-window average | ⚠️ Heuristic, not Bayesian |
+| 16 | Pipeline | Biologically-inspired architecture | ✅ Sound (engineering abstraction) |
+| 17 | L1 | snnTorch LIF zero reset mechanism | ✅ Sound |
+| 18 | Preprocessor | SOS causal bandpass filter | ✅ Sound |
 
 **Overall assessment:** The scientific foundations are solid. All equations
 match the code implementation. No claims require correction.

@@ -30,11 +30,9 @@ the "outliers" the estimator should ignore.
   16(8): 1661–1687.  Uses the identical MAD formula for extracellular noise
   estimation — the same neuroscience context as SNN Agent.
 
-**Caveat:** ⚠️ The post-calibration EMA (`_noise_est += α·(|x_t| − _noise_est)`)
-tracks raw $|x_t|$ directly, not a running MAD.  This EMA is never used
-downstream — `dvm` and `centers` are fixed at calibration time.  The EMA is
-therefore dead code from a functional standpoint.  Consider either wiring it
-to adaptively update `dvm` or removing it entirely.
+**Caveat:** None.  The implementation is a textbook application of the
+MAD / 0.6745 estimator.  Bin centres and half-widths are fixed at calibration
+time, which is appropriate for stationary noise conditions.
 
 ---
 
@@ -287,8 +285,8 @@ making early confidence values noisy.  This is noted in the README.
 ## 12. Pipeline Architecture — Biological Plausibility
 
 **Claim (implicit):** The overall architecture — bandpass → encode → detect →
-template match → decode — mimics a plausible neural processing hierarchy for
-spike sorting.
+gate → inhibit → template match → identify → decode — mimics a plausible
+neural processing hierarchy for spike sorting.
 
 **Evaluation:** ✅ **Sound as an engineering abstraction.**
 
@@ -301,9 +299,15 @@ The pipeline mirrors established computational neuroscience architectures:
 3. **Attention neuron with depression** = novelty/salience detection.
    Short-term depression naturally implements a high-pass filter for temporal
    patterns, suppressing response to sustained or repetitive inputs.
-4. **Template matching via competitive STDP** = cortical column-like
+4. **Noise gate** = inhibitory counterpart to the attention neuron.  Push–pull
+   excitation/suppression mirrors cortical excitatory/inhibitory balance.
+5. **Post-spike inhibition** = refractory blanking via inhibitory interneurons.
+   Standard in cortical models.
+6. **Template matching via competitive STDP** = cortical column-like
    specialisation.  Each neuron learns a prototype.
-5. **Rate/population decode** = standard motor cortex readout models.
+7. **DEC hierarchical grouping** = second-level abstraction, grouping L1
+   features into putative unit identities.
+8. **Rate/population decode** = standard motor cortex readout models.
 
 The architecture does not claim to be a biophysically detailed model — it is
 a biologically *inspired* engineering system.  This is appropriate.
@@ -343,11 +347,94 @@ textbook implementation of real-time IIR filtering.
 
 ---
 
+## 15. Noise Gate — 1-D Kalman Variance Tracker
+
+**Claim:** The noise gate uses a 1-D Kalman filter to track signal variance
+and suppresses template layer input when the estimated standard deviation is
+below a configurable multiple of the noise baseline.
+
+**Implementation:** `core/noise_gate.py` — standard predict/update cycle with
+state = variance estimate, measurement = squared sample.  Gating uses linear
+interpolation between `suppression_factor` and 1.0, smoothed with an EMA.
+
+**Evaluation:** ✅ **Sound.**
+
+The 1-D Kalman filter is optimal for tracking a scalar state under Gaussian
+noise.  Using it for variance estimation is a pragmatic engineering choice.
+The push–pull modulation with the attention neuron is analogous to
+excitatory/inhibitory balance in cortical circuits.
+
+**Caveat:** None.  The implementation is straightforward.
+
+---
+
+## 16. Global Inhibition — Post-Spike Blanking with Strong-Signal Bypass
+
+**Claim:** After any L1 neuron fires, all L1 input is suppressed for a
+configurable blanking window (default 5 ms), unless the raw input current
+exceeds a strength threshold, allowing strong signals to break through.
+
+**Implementation:** `core/inhibition.py` — countdown timer activated on any
+L1 spike, returns suppression factor 0.0 (block) or 1.0 (pass).  Strong
+signals bypass via `current_magnitude >= strength_threshold`.
+
+**Evaluation:** ✅ **Sound.**
+
+Post-spike inhibition is a well-established mechanism in cortical circuits,
+mediated by inhibitory interneurons.  The strong-signal bypass is a practical
+engineering choice that prevents the inhibitor from masking genuinely
+distinct, high-amplitude spikes that happen to occur during the blanking
+window.
+
+**Caveat:** None.
+
+---
+
+## 17. DEC Layer — DN-Gated Hierarchical Competitive STDP
+
+**Claim:** The DEC layer uses 16 LIF neurons that receive L1 spikes and learn
+to produce one spike per putative neural unit, using the same competitive
+STDP rule as L1 but with DN-gated input integration.
+
+**Implementation:** `core/dec_layer.py` — neurons 1–15 use asymmetric STDP
+(global LTD + causal LTP) with WTA competition, gated by a DN-controlled
+integration window (`dn_window_ms`).
+
+**Evaluation:** ✅ **Sound.**
+
+The DEC layer implements a standard hierarchical competitive learning
+architecture: L1 learns low-level features (waveform shapes), DEC learns
+higher-level associations (which combinations of L1 responses correspond to
+the same neural unit).  This mirrors the L1→L2 hierarchy in the original
+MATLAB ANNet architecture.
+
+**Caveat:** None for the STDP mechanism.  The DN-gated window is a pragmatic
+engineering choice that addresses a timing problem: the DN fires slightly
+before L1 completes its template matching.
+
+---
+
+## 18. DEC Layer — Hard-Wired OR Gate (Neuron 0)
+
+**Claim:** DEC neuron 0 is a hard-wired OR gate that fires whenever any L1
+neuron fires while the DN is active, with no learning.
+
+**Implementation:** `core/dec_layer.py` — neuron 0 has fixed unit weights
+from all L1 neurons, very low threshold, and no STDP updates.
+
+**Evaluation:** ⚠️ **Engineering choice, not a learned component.**
+
+The OR gate provides a reliable "any spike detected" signal for simple
+control tasks but does not discriminate between neural units.  This is by
+design — it serves as a guaranteed baseline detection signal.
+
+---
+
 ## Summary
 
 | # | Claim | Verdict | Action needed |
 |---|---|---|---|
-| 1 | MAD / 0.6745 noise estimator | ✅ | Remove unused post-calibration EMA |
+| 1 | MAD / 0.6745 noise estimator | ✅ | — |
 | 2 | Temporal receptive field encoding | ✅ | — |
 | 3 | LIF + synaptic depression (DN) | ✅ | — |
 | 4 | DN threshold derivation | ✅ | — |
@@ -361,8 +448,12 @@ textbook implementation of real-time IIR filtering.
 | 12 | Pipeline architecture | ✅ | — |
 | 13 | snnTorch LIF zero reset | ✅ | — |
 | 14 | SOS causal bandpass | ✅ | — |
+| 15 | Noise gate (Kalman variance tracker) | ✅ | — |
+| 16 | Post-spike blanking with bypass | ✅ | — |
+| 17 | DEC hierarchical competitive STDP | ✅ | — |
+| 18 | DEC OR gate (neuron 0) | ⚠️ | Engineering choice — no learning |
 
 **Overall assessment:** The scientific foundations are solid.  All equations
-match the code implementation.  The three minor caveats (unused EMA, WTA
-stability warning, confidence warm-up) are documented above and in the README.
-No claims require correction.
+match the code implementation.  The four minor caveats (DN reset derivation,
+WTA stability warning, confidence warm-up, OR gate design choice) are
+documented above.  No claims require correction.

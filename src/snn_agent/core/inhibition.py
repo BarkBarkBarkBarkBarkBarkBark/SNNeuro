@@ -43,11 +43,14 @@ class GlobalInhibitor:
 
     def __init__(self, cfg: Config) -> None:
         inh = cfg.inhibition
-        effective_fs = cfg.effective_fs()
+        # Use sampling_rate_hz directly — this constructor receives the
+        # effective (post-decimation) config from pipeline.py, so
+        # sampling_rate_hz is already the correct downstream rate.
+        fs = cfg.sampling_rate_hz
 
         # Convert ms → samples
         self.blanking_samples = max(
-            1, int(inh.duration_ms * 1e-3 * effective_fs)
+            1, int(inh.duration_ms * 1e-3 * fs)
         )
         self.strength_threshold = inh.strength_threshold
 

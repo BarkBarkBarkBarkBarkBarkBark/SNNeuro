@@ -301,6 +301,26 @@ async def _process_stream(
                     f"   ✅ Pipeline ready [{' → '.join(components)}] — "
                     f"processing at {preproc.effective_fs} Hz"
                 )
+                # Threshold reachability diagnostic
+                _w_max = float(pipeline_obj.template.W.max())
+                _n_est = min(
+                    encoder.n_afferents,
+                    int(effective_cfg.encoder.overlap * effective_cfg.encoder.window_depth),
+                )
+                _max_I = _n_est * _w_max + pipeline_obj.template.dn_weight
+                _beta = float(np.exp(-1.0 / effective_cfg.l1.tm_samples))
+                _v_ss = _max_I / (1.0 - _beta)
+                _thr = pipeline_obj.template.threshold
+                if _v_ss < _thr * 0.8:
+                    print(
+                        f"   ⚠ L1 threshold {_thr:.0f} may be unreachable "
+                        f"(V_ss≈{_v_ss:.0f}) — consider raising dn_weight"
+                    )
+                else:
+                    print(
+                        f"   📊 L1 threshold={_thr:.0f}  V_ss≈{_v_ss:.0f}  "
+                        f"headroom={_v_ss/_thr:.1%}"
+                    )
 
             dn_spike = pipeline_obj.attention.step(afferents)
             dn_buf.append(int(dn_spike))
@@ -313,7 +333,7 @@ async def _process_stream(
 
             # Global inhibition: post-spike blanking
             if pipeline_obj.inhibitor is not None:
-                max_current = float(encoder.n_afferents)  # rough magnitude estimate
+                max_current = pipeline_obj.template.last_current_magnitude
                 inh_factor = pipeline_obj.inhibitor.gate(max_current, any_l1_fired_prev)
                 suppression *= inh_factor
                 last_inhibition = pipeline_obj.inhibitor.active

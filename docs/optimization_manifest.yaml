@@ -7,7 +7,7 @@
 
 study:
   name: "snn-spike-sorting"
-  direction: maximize          # maximize accuracy
+  direction: maximize          # maximize f_half (F₀.₅ precision-weighted metric)
   n_trials: 80                 # total evaluation budget
   n_jobs: 1                    # sequential (GIL prevents true thread parallelism)
   timeout_s: null              # optional wall-clock cap (seconds)
@@ -18,10 +18,17 @@ study:
 
 # ── Objective metric ─────────────────────────────────────────────────────────
 objective:
-  metric: accuracy             # column name from spikeinterface perf DataFrame
+  metric: f_half               # F₀.₅ = 1.25·P·R / (0.25P + R) — precision-weighted
   aggregation: mean            # mean across ground-truth units
+  delta_time: 2.0              # spike matching tolerance in ms (SI default 0.4)
+  score_after_s: 15.0          # train/test split: score only spikes after 15 s
+  scenarios:                   # multiple synthetic signals to prevent overfitting
+    - {seed: 42,  noise_level: 8.0,  num_units: 2, firing_rates: [6.0, 10.0]}
+    - {seed: 137, noise_level: 10.0, num_units: 2, firing_rates: [6.0, 10.0]}
+    - {seed: 256, noise_level: 6.0,  num_units: 2, firing_rates: [8.0, 14.0]}
+    - {seed: 789, noise_level: 12.0, num_units: 3, firing_rates: [5.0, 8.0, 12.0]}
 
-# ── Synthetic recording (single, cached) ─────────────────────────────────────
+# ── Synthetic recording (single-scenario, used by snn-evaluate CLI only) ──────
 recording:
   duration_s: 20.0
   fs: 30000
@@ -61,6 +68,19 @@ parameters:
     low:  40.0
     high: 120.0
     description: "Excitatory boost from DN spike to all L1 neurons (must help reach threshold)"
+
+  dn_depression_tau:
+    type: int
+    low:  100
+    high: 800
+    step: 50
+    description: "DN pRel depression time constant (samples) — controls refractory recovery"
+
+  dn_depression_frac:
+    type: float
+    low:  0.005
+    high: 0.05
+    description: "DN pRel depression depth per spike — larger = stronger depression"
 
   l1_stdp_ltp:
     type: log
@@ -130,3 +150,16 @@ parameters:
     low:  0.0
     high: 0.3
     description: "Minimum suppression multiplier when fully gating (0 = total block, 0.3 = mild)"
+
+  ng_ema_alpha:
+    type: float
+    low:  0.05
+    high: 0.3
+    description: "EMA smoothing alpha for noise gate suppression (higher = faster adaptation to spikes)"
+
+  # ── NEW: DEC layer parameters ────────────────────────────────────────
+  dec_dn_window_ms:
+    type: float
+    low:  0.5
+    high: 5.0
+    description: "Post-DN integration window for DEC layer (ms) — how long DEC stays active after DN fires"

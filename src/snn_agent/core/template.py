@@ -91,6 +91,7 @@ class TemplateLayer:
         self.t: int = 0
         self.last_post_spike = np.full(n, -9999, dtype=np.int64)
         self.last_pre_spike = np.full(n_afferents, -9999, dtype=np.int64)
+        self.last_current_magnitude: float = 0.0  # pre-suppression peak |I|
 
     # ── public API ────────────────────────────────────────────────────
     def step(
@@ -131,6 +132,9 @@ class TemplateLayer:
 
         if dn_spike:
             current = current + self.dn_weight
+
+        # Expose pre-suppression peak for inhibitor bypass decision
+        self.last_current_magnitude = float(current.max())
 
         # Apply suppression from noise gate / inhibitor
         if suppression < 1.0:

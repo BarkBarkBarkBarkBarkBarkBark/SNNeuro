@@ -1,6 +1,6 @@
 # AGENT-HINT: Optuna hyperparameter optimization.
 # PURPOSE: TPE sampler searches the space defined in optimization_manifest.yaml.
-# SEARCH SPACE: 13 params (8 original + 5 new: inhibition + noise gate).
+# SEARCH SPACE: 17 params across 6 groups (encoder, DN, STDP, inhibition, noise gate, DEC).
 # ADDING PARAMS: Add to docs/optimization_manifest.yaml, add flat-key to config.py _FLAT_MAP.
 # SEE ALSO: evaluate.py (objective function), config.py (Config.from_flat), data/best_config.json
 """
@@ -21,12 +21,47 @@ import yaml
 import optuna
 from optuna.samplers import TPESampler
 
-from snn_agent.eval.evaluate import evaluate_pipeline
+from snn_agent.eval.evaluate import multi_evaluate
 
 __all__ = ["run_optimization"]
 
 ROOT = Path(__file__).resolve().parent.parent.parent.parent  # project root
 DATA_DIR = ROOT / "data"
+
+
+def _load_best_seed(param_defs: dict, best_path: Path | None = None) -> dict | None:
+    """Load best_config.json and fill defaults for any new manifest params.
+
+    Returns a dict suitable for ``study.enqueue_trial()`` or None if the
+    file doesn't exist.
+    """
+    if best_path is None:
+        best_path = DATA_DIR / "best_config.json"
+    if not best_path.exists():
+        return None
+
+    with open(best_path) as f:
+        best = json.load(f)
+    known = best.get("parameters", {})
+
+    seed: dict = {}
+    for name, spec in param_defs.items():
+        if name in known:
+            seed[name] = known[name]
+        else:
+            # Use midpoint of search range as default for new params
+            lo, hi = spec.get("low", 0), spec.get("high", 1)
+            ptype = spec["type"]
+            if ptype == "int":
+                seed[name] = (int(lo) + int(hi)) // 2
+            elif ptype == "bool":
+                seed[name] = True
+            elif ptype == "log":
+                import math
+                seed[name] = math.exp((math.log(lo) + math.log(hi)) / 2)
+            else:
+                seed[name] = (lo + hi) / 2.0
+    return seed
 
 
 def _find_manifest() -> Path:
@@ -64,9 +99,11 @@ def suggest_params(trial: optuna.Trial, param_defs: dict) -> dict:
 
 def make_objective(manifest: dict):
     param_defs = manifest["parameters"]
-    rec_params = manifest.get("recording", {})
     obj_cfg = manifest.get("objective", {})
-    metric_name = obj_cfg.get("metric", "accuracy")
+    metric_name = obj_cfg.get("metric", "f_half")
+    scenarios = obj_cfg.get("scenarios", None)
+    score_after_s = obj_cfg.get("score_after_s", 15.0)
+    delta_time_val = obj_cfg.get("delta_time", 2.0)
 
     def objective(trial: optuna.Trial) -> float:
         overrides = suggest_params(trial, param_defs)
@@ -74,9 +111,11 @@ def make_objective(manifest: dict):
         t_start = time.perf_counter()
 
         try:
-            result = evaluate_pipeline(
+            result = multi_evaluate(
                 cfg_overrides=overrides,
-                rec_params=rec_params if rec_params else None,
+                scenarios=scenarios,
+                score_after_s=score_after_s,
+                delta_time=delta_time_val,
                 verbose=False,
             )
         except Exception as e:
@@ -87,14 +126,14 @@ def make_objective(manifest: dict):
         score = result.get(metric_name, 0.0)
         dt = time.perf_counter() - t_start
 
-        for key in ("accuracy", "recall", "precision", "n_active", "total_spikes", "runtime_s"):
+        for key in ("accuracy", "recall", "precision", "f_half",
+                     "n_active", "total_spikes", "runtime_s"):
             trial.set_user_attr(key, result.get(key, 0))
 
         print(
-            f"  acc={score:.4f}  recall={result.get('recall',0):.4f}  "
+            f"  f½={score:.4f}  acc={result.get('accuracy',0):.4f}  "
             f"prec={result.get('precision',0):.4f}  "
-            f"L1={result.get('n_active',0)}neurons/"
-            f"{result.get('total_spikes',0)}spk  ({dt:.0f}s)"
+            f"rec={result.get('recall',0):.4f}  ({dt:.0f}s)"
         )
         return float(score)
 
@@ -142,6 +181,7 @@ def run_optimization(
     n_trials: int | None = None,
     n_jobs: int | None = None,
     output_dir: Path | None = None,
+    seed_best: bool = True,
 ):
     if manifest_path is None:
         manifest_path = _find_manifest()
@@ -180,6 +220,17 @@ def run_optimization(
         load_if_exists=True,
     )
 
+    # Seed the study with the known best config so TPE starts informed
+    if seed_best and len(study.trials) == 0:
+        seed_params = _load_best_seed(manifest["parameters"])
+        if seed_params is not None:
+            study.enqueue_trial(seed_params)
+            print("  🌱 Enqueued best_config.json as seed trial (trial 0)")
+            for k, v in seed_params.items():
+                vfmt = f"{v:.6g}" if isinstance(v, float) else str(v)
+                print(f"       {k:30s} = {vfmt}")
+            print()
+
     study.optimize(make_objective(manifest), n_trials=actual_trials, timeout=timeout, n_jobs=1)
 
     print()
@@ -206,6 +257,10 @@ def main() -> None:
     parser.add_argument("--n-trials", type=int, default=None)
     parser.add_argument("--n-jobs", type=int, default=None)
     parser.add_argument("--output-dir", type=str, default=str(DATA_DIR))
+    parser.add_argument(
+        "--no-seed", action="store_true",
+        help="Don't enqueue best_config.json as seed trial",
+    )
     args = parser.parse_args()
 
     run_optimization(
@@ -213,6 +268,7 @@ def main() -> None:
         n_trials=args.n_trials,
         n_jobs=args.n_jobs,
         output_dir=Path(args.output_dir),
+        seed_best=not args.no_seed,
     )
 
 

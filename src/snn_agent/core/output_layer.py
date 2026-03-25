@@ -1,12 +1,9 @@
-# AGENT-HINT: L2 classification / convergence layer (optional).
-# PURPOSE: Receives L1 spikes and converges multiple template neurons onto
-#          discrete unit identities via lateral inhibition + STDP.
-#          Mirrors the MATLAB Output_Layer (10 neurons, wiFactor=10).
-# CONFIG:  L2Config in config.py (n_neurons, wi_factor, stdp_ltp, stdp_ltd, tm_samples)
-# WIRING:  Gated by Config.use_l2 flag. Built in complete_pipeline().
-#          Output feeds into ControlDecoder instead of raw L1 spikes.
-# SEE ALSO: template.py (L1 upstream), decoder.py (downstream consumer),
-#           config.py (L2Config), pipeline.py (integration),
+# AGENT-HINT: DEPRECATED — replaced by dec_layer.py.
+# This file is retained for reference only.  It is NOT imported by pipeline.py
+# and NOT wired into the active processing chain.  The DEC layer (dec_layer.py)
+# provides DN-gated hierarchical competitive learning with 16 neurons instead.
+# ORIGINAL: L2 classification / convergence layer from MATLAB ANNet Output_Layer.
+# SEE ALSO: dec_layer.py (replacement), template.py (L1 upstream),
 #           docs/reference/MB2018-ANNet/Output_Layer/ (MATLAB reference)
 """
 snn_agent.core.output_layer — L2 classification layer with lateral inhibition.

@@ -72,7 +72,7 @@ class DecoderConfig:
     weights: list[float] | None = None
     threshold: float = 3.0
     leaky_tau_ms: float = 10.0
-    dn_confidence_window_ms: float = 5.0
+    dn_confidence_window_ms: float = 50.0
     max_rate_hz: float = 100.0   # normalisation ceiling for rate strategy
 
 
@@ -110,6 +110,7 @@ class NoiseGateConfig:
     measurement_noise: float = 1.0
     inhibit_below_sd: float = 2.0   # suppress when σ_est < factor × σ_noise
     suppression_factor: float = 0.1  # minimum scaling when fully suppressing
+    ema_alpha: float = 0.15          # EMA smoothing for suppression (higher = faster)
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +138,7 @@ class DECConfig:
     freeze_stdp: bool = False
     use_delays: bool = True       # toggle delay expansion
     n_delay_taps: int = 16        # delay buffer depth (taps)
+    dn_window_ms: float = 2.5    # keep DEC gate open N ms after each DN spike
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -305,6 +307,9 @@ _FLAT_MAP: dict[str, tuple[str | None, str]] = {
     "dec_freeze_stdp": ("dec", "freeze_stdp"),
     "dec_use_delays": ("dec", "use_delays"),
     "dec_n_delay_taps": ("dec", "n_delay_taps"),
+    "dec_dn_window_ms": ("dec", "dn_window_ms"),
+    # noise gate extras
+    "ng_ema_alpha": ("noise_gate", "ema_alpha"),
 }
 
 

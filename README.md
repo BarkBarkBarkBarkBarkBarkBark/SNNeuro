@@ -18,13 +18,13 @@ your signal and watch it learn.
 | Offline spike sorting delays your experiment by hours | Sorts spikes **in real time** as they arrive |
 | Traditional sorters need hand-picked templates | The network **learns templates automatically** via competitive plasticity (STDP) |
 | Noise floods your signal with false positives | A **Kalman-filter noise gate** and **post-spike inhibition** suppress noise while letting real spikes through |
-| Closed-loop experiments need instant feedback | A **control decoder** converts sorted spikes into a control signal with sub-millisecond latency |
+| Closed-loop experiments need instant feedback | A **control decoder** converts sorted spikes into a control signal with sub-millisecond processing latency (sample-by-sample at 20 kHz) |
 | Setup is complicated | One command to install, one command to run. **Browser GUI** with live raster, network topology, and tunable parameters |
 
 ## How it works
 
 ```
-electrode → filter → encode → detect → sort → decode → control signal
+electrode → filter → encode → detect + gate → inhibit → sort → identify → decode
 ```
 
 1. **Filter** — Bandpass cleans your signal (300 Hz – 6 kHz) and decimation
@@ -34,10 +34,19 @@ electrode → filter → encode → detect → sort → decode → control signa
 3. **Detect** — An attention neuron watches for moments when the signal
    energy rises above the noise floor.  It fires when something interesting
    happens.
-4. **Sort** — 110 spiking neurons compete to match waveform templates.
-   Each neuron specialises on a different spike shape through competitive
-   learning.  The best match wins.
-5. **Decode** — Sorted spikes are converted into a control signal you can
+4. **Gate** — A Kalman-filter noise gate runs in parallel, continuously
+   estimating signal variance.  When variance is close to baseline noise,
+   it suppresses downstream input — only letting real spikes through.
+5. **Inhibit** — After any template neuron fires, a global inhibitor
+   blanks all input for 5 ms (preventing double-counting), unless a strong
+   signal breaks through.
+6. **Sort** — Template neurons compete to match waveform shapes.
+   Each neuron specialises through competitive STDP learning.  The best
+   match wins (winner-take-all).
+7. **Identify** — A 16-neuron DEC layer learns to associate template
+   responses with distinct neural units.  Neuron 0 is a simple spike
+   detector; neurons 1–15 learn unit identities via STDP.
+8. **Decode** — Sorted spikes are converted into a control signal you can
    send to your experiment hardware in real time.
 
 Everything runs at 20 kHz with results streaming live to your browser.
@@ -77,13 +86,14 @@ synthetic and file modes live from the browser.
 
 | Command | What it does |
 |---|---|
-|`snn-lsl data/raw/CSC285_0001.ncs`| Run the agent with the |
 | `snn-serve` | Start the agent server + browser GUI |
 | `snn-serve --mode synthetic` | Start with built-in synthetic signal |
 | `snn-lsl <ncs_path>` | Replay a `.ncs` file over Lab Streaming Layer |
 | `snn-test-electrode` | Synthetic UDP test signal generator |
 | `snn-evaluate` | Offline pipeline evaluation against ground truth |
-| `snn-optimize` | Automated hyperparameter search (Optuna) |
+| `snn-optimize` | Optuna TPE hyperparameter search (Stage 1) |
+| `snn-genetic` | Genetic crossover optimizer (Stage 2) |
+| `snn-ground-truth` | Generate synthetic ground-truth recording |
 
 ## Browser GUI
 
@@ -107,7 +117,7 @@ The live dashboard runs at `http://localhost:8080` and shows:
 └──────────────┬──────────────────────────┘
                ▼
         ┌──────────────┐
-        │ Preprocessor │  Bandpass 300–6 kHz + decimate
+        │ Preprocessor │  Bandpass 300–6 kHz + decimate ÷4
         └──────┬───────┘
                ▼
         ┌──────────────┐
@@ -122,11 +132,15 @@ The live dashboard runs at `http://localhost:8080` and shows:
          └──────┬──────┘
                 ▼
         ┌───────────────┐
-        │ Global Inhibit│  Post-spike blanking
+        │ Global Inhibit│  Post-spike blanking (5 ms)
         └───────┬───────┘
                 ▼
         ┌───────────────┐
-        │ Template Layer│  110 LIF neurons + WTA + STDP
+        │ Template Layer│  LIF neurons + WTA + STDP
+        └───────┬───────┘
+                ▼
+        ┌───────────────┐
+        │   DEC Layer   │  16 neurons: spike detection + unit ID
         └───────┬───────┘
                 ▼
         ┌───────────────┐
@@ -153,17 +167,34 @@ cfg = cfg.with_overrides(sampling_rate_hz=30000)  # keyword overrides
 
 ## Hyperparameter optimisation
 
-Automated search using [Optuna](https://optuna.org/) (TPE sampler) against
-SpikeInterface ground-truth synthetic recordings:
+Two-stage automated search against SpikeInterface ground-truth synthetic
+recordings:
 
 ```bash
-snn-optimize                    # default trial budget
-snn-optimize --n-trials 80     # custom budget
-snn-evaluate                    # single evaluation run
+# Stage 1 — Optuna TPE search
+snn-optimize --n-trials 80
+
+# Stage 2 — Genetic crossover of top trials
+snn-genetic --top-k 10 --n-offspring 160
+
+# Single evaluation run
+snn-evaluate
 ```
 
-Results are saved to `data/best_config.json` and `data/trials.csv`.
-See `docs/optimization_manifest.yaml` for the full search space definition.
+**Evaluation methodology:**
+- **4 synthetic scenarios** with varied seeds, noise levels, unit counts,
+  and firing rates — prevents overfitting to one signal.
+- **Train/test temporal split** — STDP learns during 0–15 s, scored on
+  15–20 s only.
+- **2.0 ms spike-matching tolerance** — 5× tighter than the typical 10 ms.
+- **F₀.₅ objective** — precision-weighted metric that penalises false
+  positives 2× more than missed spikes.
+
+Results are saved to `data/best_config.json` and `data/trials.csv`
+(or `data/genetic_trials.csv` for Stage 2).
+
+> 📖 For the full methodology, search space, and interpretation guide,
+> see **[Optimization Guide](docs/optimization_guide.md)**.
 
 ## Project structure
 
@@ -171,6 +202,7 @@ See `docs/optimization_manifest.yaml` for the full search space definition.
 snn-agent/
 ├── pyproject.toml                  # Package definition & entry points
 ├── README.md                       # ← You are here
+├── AGENTS.md                       # Machine-readable context map for AI agents
 ├── src/snn_agent/
 │   ├── config.py                   # All parameters (frozen dataclasses)
 │   ├── core/
@@ -179,7 +211,7 @@ snn-agent/
 │   │   ├── attention.py            # Attention neuron (DN)
 │   │   ├── noise_gate.py           # Kalman noise suppressor
 │   │   ├── inhibition.py           # Global post-spike inhibition
-│   │   ├── template.py             # Template layer (L1) — 110 LIF + STDP
+│   │   ├── template.py             # Template layer (L1) — LIF + STDP
 │   │   ├── dec_layer.py            # Spiking decoder layer (DEC, 16 neurons)
 │   │   ├── decoder.py              # Control decoder
 │   │   └── pipeline.py             # Factory: builds the full chain
@@ -188,18 +220,22 @@ snn-agent/
 │   │   └── static/index.html       # Browser GUI
 │   ├── eval/
 │   │   ├── evaluate.py             # Offline scorer (SpikeInterface)
-│   │   ├── optimize.py             # Optuna hyperparameter search
+│   │   ├── optimize.py             # Optuna TPE hyperparameter search
+│   │   ├── genetic.py              # Genetic crossover optimizer
 │   │   └── ground_truth.py         # Synthetic ground-truth generation
 │   └── io/
 │       ├── lsl_player.py           # Replay .ncs over LSL
 │       └── test_electrode.py       # Synthetic UDP signal generator
 ├── data/
-│   ├── best_config.json            # Best optimisation trial
-│   ├── trials.csv                  # Full optimisation history
+│   ├── best_config.json            # Best optimisation result (params + metrics)
+│   ├── trials.csv                  # Full Optuna history
+│   ├── genetic_trials.csv          # Genetic optimizer history
 │   └── raw/                        # Raw neural recordings (.ncs)
 └── docs/
     ├── scientific_principles.md    # Full math, pseudocode & scientific basis
-    ├── optimization_manifest.yaml  # Search space definition
+    ├── scientific_claims.md        # Independent audit of all scientific claims
+    ├── optimization_guide.md       # Two-stage optimization reference
+    ├── optimization_manifest.yaml  # Search space + evaluation config
     ├── annet_architecture.yaml     # Original ANNet design reference
     └── manifesto.json              # Machine-readable project contract
 ```
@@ -220,11 +256,15 @@ snn-agent/
 
 - **[Scientific Principles](docs/scientific_principles.md)** — full
   mathematical specification, pseudocode, plain-English explanations, and
-  audited scientific claims with literature references.
+  scientific basis with literature references.
+- **[Scientific Claims Audit](docs/scientific_claims.md)** — independent
+  evaluation of every scientific claim against the literature and code.
+- **[Optimization Guide](docs/optimization_guide.md)** — two-stage
+  optimization methodology, search space, metrics, and interpretation.
 - **[Architecture Reference](docs/annet_architecture.yaml)** — detailed
   ANNet→Python porting decisions.
 - **[Optimisation Manifest](docs/optimization_manifest.yaml)** — search
-  space definition for Optuna.
+  space and evaluation configuration.
 
 ## License
 

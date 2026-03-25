@@ -44,8 +44,10 @@ class ControlDecoder:
         self.strategy = dec.strategy
         self.n = n_l1
 
-        # Effective sampling rate (post-decimation)
-        self._fs = float(cfg.effective_fs())
+        # Sampling rate — this constructor receives the effective
+        # (post-decimation) config from pipeline.py, so sampling_rate_hz
+        # is already the correct downstream rate.
+        self._fs = float(cfg.sampling_rate_hz)
 
         # Control weights — default is *ones* (not 1/n), because WTA means
         # exactly one neuron fires per step.  Normalising by n makes each

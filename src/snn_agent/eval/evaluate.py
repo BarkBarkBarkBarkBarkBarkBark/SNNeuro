@@ -22,7 +22,7 @@ from snn_agent.config import Config, DEFAULT_CONFIG
 from snn_agent.core.pipeline import build_pipeline, complete_pipeline
 from snn_agent.eval.ground_truth import make_single_channel_ground_truth
 
-__all__ = ["evaluate_pipeline"]
+__all__ = ["evaluate_pipeline", "multi_evaluate"]
 
 class _ThresholdUnreachable(Exception):
     pass
@@ -43,6 +43,8 @@ def evaluate_pipeline(
     cfg_overrides: dict | None = None,
     rec_params: dict | None = None,
     verbose: bool = False,
+    delta_time: float = 2.0,
+    score_after_s: float | None = None,
 ) -> dict:
     """
     Run the full SNN pipeline offline and score against ground truth.
@@ -55,10 +57,17 @@ def evaluate_pipeline(
         Synthetic recording parameters.
     verbose : bool
         Print progress.
+    delta_time : float
+        Spike matching tolerance in ms for SpikeInterface comparison.
+        Default 2.0 ms (5× tighter than prior 10 ms; SpikeInterface default 0.4 ms).
+    score_after_s : float, optional
+        If set, only score spikes occurring after this time (seconds).
+        Enables train/test temporal split: STDP learns on all data
+        but accuracy is measured only on the test window.
 
     Returns
     -------
-    dict with accuracy, recall, precision, n_active, total_spikes, runtime_s, perf_df.
+    dict with accuracy, recall, precision, f_half, n_active, total_spikes, runtime_s, perf_df.
     """
     # Build config with overrides
     if cfg_overrides:
@@ -150,7 +159,7 @@ def evaluate_pipeline(
 
                 # Global inhibition
                 if pipeline_obj.inhibitor is not None:
-                    max_current = float(encoder.n_afferents)
+                    max_current = pipeline_obj.template.last_current_magnitude
                     inh_factor = pipeline_obj.inhibitor.gate(max_current, any_l1_fired_prev)
                     suppression *= inh_factor
 
@@ -194,6 +203,7 @@ def evaluate_pipeline(
         "accuracy": 0.0,
         "recall": 0.0,
         "precision": 0.0,
+        "f_half": 0.0,
         "n_active": n_active,
         "total_spikes": total_spikes,
         "runtime_s": elapsed,
@@ -203,11 +213,34 @@ def evaluate_pipeline(
     if not l1_spike_log:
         return result
 
-    l1_sorting_dict = {
-        nid: np.array(times, dtype=np.int64)
-        for nid, times in l1_spike_log.items()
-        if len(times) > 0
-    }
+    # ── Train/test split: filter spikes to scoring window ─────────────
+    if score_after_s is not None and score_after_s > 0:
+        t_start_sample = int(score_after_s * fs)
+        l1_sorting_dict = {
+            nid: np.array([t for t in times if t >= t_start_sample], dtype=np.int64)
+            for nid, times in l1_spike_log.items()
+        }
+        l1_sorting_dict = {k: v for k, v in l1_sorting_dict.items() if len(v) > 0}
+        gt_test = {
+            uid: train[train >= t_start_sample]
+            for uid, train in gt_unit_trains.items()
+        }
+        sorting_cmp = NumpySorting.from_unit_dict(gt_test, sampling_frequency=fs)
+        if verbose:
+            n_test_gt = sum(len(v) for v in gt_test.values())
+            n_test_det = sum(len(v) for v in l1_sorting_dict.values())
+            print(f"  🧪 Scoring window: {score_after_s}s–end "
+                  f"({n_test_gt} GT spikes, {n_test_det} detected)")
+    else:
+        l1_sorting_dict = {
+            nid: np.array(times, dtype=np.int64)
+            for nid, times in l1_spike_log.items()
+            if len(times) > 0
+        }
+        sorting_cmp = sorting_true
+
+    if not l1_sorting_dict:
+        return result
 
     l1_sorting = NumpySorting.from_unit_dict(
         units_dict_list=l1_sorting_dict,
@@ -215,19 +248,129 @@ def evaluate_pipeline(
     )
 
     cmp = sc.compare_sorter_to_ground_truth(
-        gt_sorting=sorting_true,
+        gt_sorting=sorting_cmp,
         tested_sorting=l1_sorting,
         exhaustive_gt=True,
-        delta_time=10.0,
+        delta_time=delta_time,
     )
     perf = cmp.get_performance()
 
+    P = float(perf["precision"].mean())
+    R = float(perf["recall"].mean())
+
     result["accuracy"] = float(perf["accuracy"].mean())
-    result["recall"] = float(perf["recall"].mean())
-    result["precision"] = float(perf["precision"].mean())
+    result["recall"] = R
+    result["precision"] = P
+    result["f_half"] = (1.25 * P * R) / (0.25 * P + R) if (P + R) > 0 else 0.0
     result["perf_df"] = perf
 
     return result
+
+
+# ── Default evaluation scenarios for multi_evaluate ──────────────────────────
+DEFAULT_SCENARIOS = [
+    {"seed": 42,  "noise_level": 8.0,  "num_units": 2, "firing_rates": [6.0, 10.0]},
+    {"seed": 137, "noise_level": 10.0, "num_units": 2, "firing_rates": [6.0, 10.0]},
+    {"seed": 256, "noise_level": 6.0,  "num_units": 2, "firing_rates": [8.0, 14.0]},
+    {"seed": 789, "noise_level": 12.0, "num_units": 3, "firing_rates": [5.0, 8.0, 12.0]},
+]
+
+
+def multi_evaluate(
+    cfg_overrides: dict | None = None,
+    scenarios: list[dict] | None = None,
+    score_after_s: float | None = 15.0,
+    delta_time: float = 2.0,
+    verbose: bool = False,
+) -> dict:
+    """
+    Evaluate the SNN pipeline across multiple synthetic scenarios.
+
+    Runs ``evaluate_pipeline()`` for each scenario (varying seed, noise,
+    unit count, firing rates) and returns averaged metrics.  This prevents
+    overfitting to a single noise realisation and ensures the reported
+    accuracy generalises.
+
+    Parameters
+    ----------
+    cfg_overrides : dict, optional
+        Flat-key config overrides (forwarded to each evaluation).
+    scenarios : list[dict], optional
+        List of recording parameter dicts.  Each must contain at least
+        ``seed``, ``noise_level``, ``num_units``, ``firing_rates``.
+        Defaults to :data:`DEFAULT_SCENARIOS` (4 diverse signals).
+    score_after_s : float, optional
+        Train/test split: only score spikes after this time (seconds).
+        Default 15.0 s for a 20 s recording (train first 15 s, test last 5 s).
+    delta_time : float
+        Spike matching tolerance in ms (default 2.0; SpikeInterface default 0.4).
+    verbose : bool
+        Print per-scenario progress.
+
+    Returns
+    -------
+    dict with averaged accuracy, recall, precision, f_half, n_active,
+    total_spikes, runtime_s, and per-scenario ``scenario_results``.
+    """
+    if scenarios is None:
+        scenarios = DEFAULT_SCENARIOS
+
+    all_results: list[dict] = []
+
+    for i, scenario in enumerate(scenarios):
+        rec_params = {
+            "duration_s": scenario.get("duration_s", 20.0),
+            "fs": scenario.get("fs", 30_000.0),
+            "num_units": scenario["num_units"],
+            "firing_rates": scenario["firing_rates"],
+            "noise_level": scenario["noise_level"],
+            "seed": scenario["seed"],
+        }
+        if verbose:
+            print(f"  ── Scenario {i + 1}/{len(scenarios)}: "
+                  f"seed={scenario['seed']}, noise={scenario['noise_level']}, "
+                  f"units={scenario['num_units']} ──")
+
+        result = evaluate_pipeline(
+            cfg_overrides=cfg_overrides,
+            rec_params=rec_params,
+            verbose=verbose,
+            delta_time=delta_time,
+            score_after_s=score_after_s,
+        )
+        all_results.append(result)
+
+        # Early termination: if first scenario scores 0, skip the rest
+        if i == 0 and result["accuracy"] == 0.0:
+            if verbose:
+                print("  ⚠ First scenario scored 0.0 — skipping remaining")
+            for _ in range(len(scenarios) - 1):
+                all_results.append({
+                    "accuracy": 0.0, "recall": 0.0, "precision": 0.0,
+                    "f_half": 0.0, "n_active": 0, "total_spikes": 0,
+                    "runtime_s": 0.0, "perf_df": None,
+                })
+            break
+
+    # ── Average metrics across scenarios ──────────────────────────────
+    avg: dict = {}
+    for key in ("accuracy", "precision", "recall", "n_active", "total_spikes", "runtime_s"):
+        vals = [r.get(key, 0) for r in all_results]
+        avg[key] = sum(vals) / len(vals)
+
+    P, R = avg["precision"], avg["recall"]
+    avg["f_half"] = (1.25 * P * R) / (0.25 * P + R) if (P + R) > 0 else 0.0
+    avg["scenario_results"] = all_results
+    avg["perf_df"] = None  # not meaningful when averaged
+
+    if verbose:
+        print(f"\n  ── Multi-scenario average ({len(scenarios)} signals) ──")
+        print(f"     Accuracy  : {avg['accuracy']:.4f}")
+        print(f"     Precision : {avg['precision']:.4f}")
+        print(f"     Recall    : {avg['recall']:.4f}")
+        print(f"     F₀.₅     : {avg['f_half']:.4f}")
+
+    return avg
 
 
 def main() -> None:
@@ -256,6 +399,7 @@ def main() -> None:
     print(f"  Accuracy  : {metrics['accuracy']:.4f}")
     print(f"  Recall    : {metrics['recall']:.4f}")
     print(f"  Precision : {metrics['precision']:.4f}")
+    print(f"  F₀.₅     : {metrics['f_half']:.4f}")
     print(f"  Active L1 : {metrics['n_active']}")
     print(f"  Total spk : {metrics['total_spikes']}")
     print(f"  Runtime   : {metrics['runtime_s']:.1f}s")

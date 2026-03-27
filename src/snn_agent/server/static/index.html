@@ -228,6 +228,63 @@ canvas {
   width: 100%;
   min-height: 14px;
 }
+
+/* ── Accuracy panel ───────────────────────────────────────── */
+#accuracy_panel {
+  background: #0a0a0a;
+  border: 1px solid #1a1a1a;
+  border-radius: 4px;
+  padding: 10px 14px;
+  margin-top: 8px;
+}
+#accuracy_panel .ctrl-title {
+  color: #00ccff;
+  font-size: 0.65rem;
+  letter-spacing: 2px;
+  margin-bottom: 8px;
+}
+.acc-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.acc-label {
+  color: #555;
+  font-size: 0.65rem;
+  min-width: 70px;
+}
+.acc-bar {
+  width: 120px;
+  height: 10px;
+  background: #111;
+  border-radius: 2px;
+  overflow: hidden;
+}
+.acc-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.3s;
+}
+.acc-prec { background: #00ff41; }
+.acc-rec  { background: #ff6600; }
+.acc-fh   { background: #00ccff; }
+.acc-val {
+  color: #00ff41;
+  font-size: 0.65rem;
+  min-width: 45px;
+}
+.acc-counts {
+  margin-top: 6px;
+  font-size: 0.6rem;
+  color: #444;
+  letter-spacing: 1px;
+}
+.acc-counts span { color: #00ff41; }
+.acc-tp { color: #00ff41 !important; }
+.acc-fp { color: #ff3333 !important; }
+.acc-fn { color: #ff6600 !important; }
+.acc-lat { color: #00ccff !important; }
 </style>
 </head>
 <body>
@@ -292,6 +349,33 @@ canvas {
   <span>noise gate = <span class="stat-ng" id="s_ng">—</span></span>
   <span>inhibition = <span class="stat-inh" id="s_inh">—</span></span>
   <span>DEC hex = <span class="stat-ctrl" id="s_hex">0x0000</span></span>
+</div>
+
+<!-- ── Live Accuracy (synthetic mode only) ────────────── -->
+<div id="accuracy_panel" style="display:none;">
+  <div class="ctrl-title">LIVE ACCURACY — SYNTHETIC GROUND TRUTH</div>
+  <div class="acc-row">
+    <span class="acc-label">Precision</span>
+    <div class="acc-bar"><div class="acc-fill acc-prec" id="acc_prec_bar" style="width:0%"></div></div>
+    <span class="acc-val" id="acc_prec_val">—</span>
+  </div>
+  <div class="acc-row">
+    <span class="acc-label">Recall</span>
+    <div class="acc-bar"><div class="acc-fill acc-rec" id="acc_rec_bar" style="width:0%"></div></div>
+    <span class="acc-val" id="acc_rec_val">—</span>
+  </div>
+  <div class="acc-row">
+    <span class="acc-label">F₀.₅</span>
+    <div class="acc-bar"><div class="acc-fill acc-fh" id="acc_fh_bar" style="width:0%"></div></div>
+    <span class="acc-val" id="acc_fh_val">—</span>
+  </div>
+  <div class="acc-counts">
+    TP: <span class="acc-tp" id="acc_tp">0</span> &nbsp;
+    FP: <span class="acc-fp" id="acc_fp">0</span> &nbsp;
+    FN: <span class="acc-fn" id="acc_fn">0</span> &nbsp;
+    Latency: <span class="acc-lat" id="acc_lat">—</span> &nbsp;
+    GT: <span id="acc_gt_progress">—</span>
+  </div>
 </div>
 
 </div><!-- /signal-col -->
@@ -374,6 +458,15 @@ canvas {
       <span class="ctrl-val" id="ttl_high_val">1.0</span>
     </div>
   </div>
+
+  <div class="ctrl-group">
+    <div class="ctrl-title">Display</div>
+    <div class="ctrl-row">
+      <label>Time Scale</label>
+      <input type="range" id="zoom_slider" min="1" max="8" step="1" value="1">
+      <span class="ctrl-val" id="zoom_val">×1 (45 ms)</span>
+    </div>
+  </div>
 </div>
 
 <div id="status">● connecting…</div>
@@ -392,6 +485,9 @@ const DEC_H      = 48;
 const CTRL_H     = 60;
 const ROW_H      = RASTER_H / N_L1;
 const DEC_ROW_H  = DEC_H / N_DEC;
+
+// Zoom: samples-per-pixel (1 = normal, 8 = 8× wider time window)
+let currentSPP = 1;
 
 // DEC neuron color palette: neuron 0 = white (any-fire), 1–15 = rainbow
 const DEC_COLORS = ['#ffffff'];
@@ -663,16 +759,20 @@ function render() {
   const N = samples.length;
   if (N === 0) { requestAnimationFrame(render); return; }
 
-  // ── Waveform (oscilloscope line — 1 px per sample) ─────────────────
-  waveCtx.drawImage(waveCv, -N, 0);
+  // ── Zoom: samples-per-pixel controls time window width ─────
+  const spp = currentSPP;
+  const shiftPx = Math.max(1, Math.ceil(N / spp));
+
+  // ── Waveform (oscilloscope line) ───────────────────────
+  waveCtx.drawImage(waveCv, -shiftPx, 0);
   waveCtx.fillStyle = '#020202';
-  waveCtx.fillRect(CVW - N, 0, N, WAVE_H);
+  waveCtx.fillRect(CVW - shiftPx, 0, shiftPx, WAVE_H);
 
   // center line
   waveCtx.strokeStyle = '#111';
   waveCtx.lineWidth = 0.5;
   waveCtx.beginPath();
-  waveCtx.moveTo(CVW - N, WAVE_H / 2);
+  waveCtx.moveTo(CVW - shiftPx, WAVE_H / 2);
   waveCtx.lineTo(CVW, WAVE_H / 2);
   waveCtx.stroke();
 
@@ -688,14 +788,15 @@ function render() {
   for (let i = 0; i < N; i++) {
     if (dnFlags[i]) {
       waveCtx.fillStyle = 'rgba(255, 102, 0, 0.25)';
-      waveCtx.fillRect(CVW - N + i, 0, 1, WAVE_H);
+      const x = CVW - shiftPx + Math.floor(i / spp);
+      waveCtx.fillRect(x, 0, Math.max(1, Math.ceil(1 / spp)), WAVE_H);
     }
   }
 
   // Inhibition tint (red overlay when active)
   if (pendingInhActive) {
     waveCtx.fillStyle = 'rgba(255, 50, 50, 0.1)';
-    waveCtx.fillRect(CVW - N, 0, N, WAVE_H);
+    waveCtx.fillRect(CVW - shiftPx, 0, shiftPx, WAVE_H);
   }
 
   // draw connected waveform line with glow
@@ -706,37 +807,38 @@ function render() {
   waveCtx.lineWidth = 1.5;
   waveCtx.lineJoin = 'round';
   waveCtx.beginPath();
-  waveCtx.moveTo(CVW - N, prevY);
+  waveCtx.moveTo(CVW - shiftPx, prevY);
   for (let i = 0; i < N; i++) {
     const yNorm = samples[i] / waveMax;
     const y = WAVE_H / 2 - yNorm * (WAVE_H / 2 - 4);
     prevY = Math.max(2, Math.min(WAVE_H - 2, y));
-    waveCtx.lineTo(CVW - N + i + 1, prevY);
+    waveCtx.lineTo(CVW - shiftPx + (i + 1) / spp, prevY);
   }
   waveCtx.stroke();
   waveCtx.restore();
 
   // ── DN strip ───────────────────────────────────────────────
-  dnCtx.drawImage(dnCv, -N, 0);
+  dnCtx.drawImage(dnCv, -shiftPx, 0);
   dnCtx.fillStyle = '#020202';
-  dnCtx.fillRect(CVW - N, 0, N, DN_H);
+  dnCtx.fillRect(CVW - shiftPx, 0, shiftPx, DN_H);
   for (let i = 0; i < N; i++) {
     if (dnFlags[i]) {
       dnCtx.fillStyle = '#ff6600';
-      dnCtx.fillRect(CVW - N + i, 0, 1, DN_H);
+      const x = CVW - shiftPx + Math.floor(i / spp);
+      dnCtx.fillRect(x, 0, Math.max(1, Math.ceil(1 / spp)), DN_H);
     }
   }
 
   // ── Noise gate strip ───────────────────────────────────────
-  ngCtx.drawImage(ngCv, -N, 0);
+  ngCtx.drawImage(ngCv, -shiftPx, 0);
   ngCtx.fillStyle = '#020202';
-  ngCtx.fillRect(CVW - N, 0, N, NG_H);
+  ngCtx.fillRect(CVW - shiftPx, 0, shiftPx, NG_H);
   // Color intensity based on suppression factor
   const ngVal = pendingNoiseGate;
   if (ngVal < 0.95) {
     const alpha = 1.0 - ngVal;
     ngCtx.fillStyle = `rgba(255, 51, 204, ${alpha * 0.8})`;
-    ngCtx.fillRect(CVW - N, 0, N, NG_H);
+    ngCtx.fillRect(CVW - shiftPx, 0, shiftPx, NG_H);
   }
   // Thin green line at current suppression level
   const ngLineY = NG_H - ngVal * NG_H;
@@ -744,9 +846,9 @@ function render() {
   ngCtx.fillRect(CVW - 1, ngLineY, 1, 1);
 
   // ── L1 raster ──────────────────────────────────────────────
-  rastCtx.drawImage(rastCv, -N, 0);
+  rastCtx.drawImage(rastCv, -shiftPx, 0);
   rastCtx.fillStyle = '#020202';
-  rastCtx.fillRect(CVW - N, 0, N, RASTER_H);
+  rastCtx.fillRect(CVW - shiftPx, 0, shiftPx, RASTER_H);
 
   // grid every 10 neurons
   rastCtx.strokeStyle = '#0d0d0d';
@@ -754,7 +856,7 @@ function render() {
   for (let k = 0; k <= N_L1; k += 10) {
     const gy = k * ROW_H;
     rastCtx.beginPath();
-    rastCtx.moveTo(CVW - N, gy);
+    rastCtx.moveTo(CVW - shiftPx, gy);
     rastCtx.lineTo(CVW, gy);
     rastCtx.stroke();
   }
@@ -767,9 +869,9 @@ function render() {
   }
 
   // ── DEC raster (always visible, 16 neurons) ───────────────
-  decCtx.drawImage(decCv, -N, 0);
+  decCtx.drawImage(decCv, -shiftPx, 0);
   decCtx.fillStyle = '#020202';
-  decCtx.fillRect(CVW - N, 0, N, DEC_H);
+  decCtx.fillRect(CVW - shiftPx, 0, shiftPx, DEC_H);
   for (const id of pendingDECSpikes) {
     if (id < N_DEC) {
       decCtx.fillStyle = DEC_COLORS[id];
@@ -778,15 +880,15 @@ function render() {
   }
 
   // ── Control signal ─────────────────────────────────────────
-  ctrlCtx.drawImage(ctrlCv, -N, 0);
+  ctrlCtx.drawImage(ctrlCv, -shiftPx, 0);
   ctrlCtx.fillStyle = '#020202';
-  ctrlCtx.fillRect(CVW - N, 0, N, CTRL_H);
+  ctrlCtx.fillRect(CVW - shiftPx, 0, shiftPx, CTRL_H);
 
   // zero line
   ctrlCtx.strokeStyle = '#111';
   ctrlCtx.lineWidth = 0.5;
   ctrlCtx.beginPath();
-  ctrlCtx.moveTo(CVW - N, CTRL_H / 2);
+  ctrlCtx.moveTo(CVW - shiftPx, CTRL_H / 2);
   ctrlCtx.lineTo(CVW, CTRL_H / 2);
   ctrlCtx.stroke();
 
@@ -932,6 +1034,15 @@ ttlHSlider.addEventListener('input', () => {
   sendCmd('ttl_high', v);
 });
 
+// Time scale (zoom) slider
+const zoomSlider = document.getElementById('zoom_slider');
+const zoomVal = document.getElementById('zoom_val');
+zoomSlider.addEventListener('input', () => {
+  currentSPP = parseInt(zoomSlider.value);
+  const msVisible = Math.round(CVW * currentSPP / 20);
+  zoomVal.textContent = `×${currentSPP} (${msVisible} ms)`;
+});
+
 // ── Source launcher controls ──────────────────────────────────────────────────
 const modeLabel   = document.getElementById('mode_label');
 const modeDot     = document.getElementById('mode_dot');
@@ -1002,10 +1113,14 @@ function connect() {
     if (msg.mode_change) {
       setMode(msg.mode_change.mode, msg.mode_change.state);
       if (msg.mode_change.state === 'finished') showLauncherMsg('Playback complete');
+      if (msg.mode_change.state === 'starting' && msg.mode_change.mode !== 'synthetic') {
+        document.getElementById('accuracy_panel').style.display = 'none';
+      }
     }
     if (msg.status === 'ok' && msg.mode) {
       setMode(msg.mode, 'running');
       if (msg.file) showLauncherMsg('▶ ' + msg.file + ' (' + msg.duration_s + 's at ' + msg.sfreq + ' Hz)');
+      else if (msg.gt_spikes !== undefined) showLauncherMsg('▶ synthetic — ' + msg.gt_spikes + ' GT spikes (live accuracy)');
       else showLauncherMsg('▶ ' + msg.mode + ' mode active');
     }
     if (msg.status === 'error') {
@@ -1041,6 +1156,25 @@ function connect() {
     if (msg.dec_hex !== undefined) {
       pendingDECHex = msg.dec_hex;
       document.getElementById('s_hex').textContent = msg.dec_hex;
+    }
+
+    // ── Live accuracy readout (synthetic mode) ──────────────
+    if (msg.accuracy !== undefined) {
+      const acc = msg.accuracy;
+      const panel = document.getElementById('accuracy_panel');
+      panel.style.display = '';
+      document.getElementById('acc_prec_bar').style.width = (acc.precision * 100) + '%';
+      document.getElementById('acc_prec_val').textContent = (acc.precision * 100).toFixed(1) + '%';
+      document.getElementById('acc_rec_bar').style.width = (acc.recall * 100) + '%';
+      document.getElementById('acc_rec_val').textContent = (acc.recall * 100).toFixed(1) + '%';
+      document.getElementById('acc_fh_bar').style.width = (acc.f_half * 100) + '%';
+      document.getElementById('acc_fh_val').textContent = (acc.f_half * 100).toFixed(1) + '%';
+      document.getElementById('acc_tp').textContent = acc.tp;
+      document.getElementById('acc_fp').textContent = acc.fp;
+      document.getElementById('acc_fn').textContent = acc.fn;
+      document.getElementById('acc_lat').textContent = acc.latency_ms.toFixed(2) + ' ms';
+      document.getElementById('acc_gt_progress').textContent =
+        (acc.gt_progress * 100).toFixed(0) + '% of ' + acc.n_gt;
     }
 
     const dnSum = pendingDNFlags.reduce((a, b) => a + b, 0);

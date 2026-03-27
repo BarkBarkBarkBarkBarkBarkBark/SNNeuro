@@ -218,6 +218,7 @@ async def _process_stream(
     *,
     pace_realtime: bool = False,
     pace_fs: float | None = None,
+    gt_spike_trains: dict | None = None,
 ):
     """
     Core streaming pipeline — shared by electrode, LSL, and synthetic modes.
@@ -244,6 +245,21 @@ async def _process_stream(
     last_inhibition: bool = False
     l1_membrane_snapshot: list[float] = []
     any_l1_fired_prev: bool = False
+
+    # ── Live accuracy tracking (synthetic mode with GT) ────────────────
+    _has_gt = gt_spike_trains is not None
+    if _has_gt:
+        _all_gt = np.sort(np.concatenate(list(gt_spike_trains.values())))
+        _gt_matched: set[int] = set()
+        _gt_ptr = 0
+        _native_fs = pace_fs or float(cfg.sampling_rate_hz)
+        _delta_samp = int(2.0 * 1e-3 * _native_fs)  # 2 ms tolerance
+        _tp = 0
+        _fp = 0
+        _fn = 0
+        _latencies: list[int] = []
+        _last_det_frame = -99999
+        _det_debounce = int(1.0 * 1e-3 * _native_fs)  # 1 ms refractory
 
     dec_info = (
         f"  decimation {cfg.sampling_rate_hz}→{preproc.effective_fs} Hz"
@@ -354,6 +370,35 @@ async def _process_stream(
             for idx in np.flatnonzero(l1_spikes):
                 l1_spike_set.add(int(idx))
 
+            # ── Live accuracy matching (synthetic GT) ────────────
+            if _has_gt:
+                # Count expired GT spikes as FN
+                while _gt_ptr < len(_all_gt) and _all_gt[_gt_ptr] < frame_idx - _delta_samp:
+                    if _gt_ptr not in _gt_matched:
+                        _fn += 1
+                    _gt_ptr += 1
+                # Match L1 fire to nearest unmatched GT spike
+                if any_l1_fired_prev and frame_idx - _last_det_frame > _det_debounce:
+                    _last_det_frame = frame_idx
+                    best_dist = float('inf')
+                    best_gi = -1
+                    for gi in range(_gt_ptr, len(_all_gt)):
+                        gt_t = int(_all_gt[gi])
+                        if gt_t > frame_idx + _delta_samp:
+                            break
+                        if gi in _gt_matched:
+                            continue
+                        dist = abs(frame_idx - gt_t)
+                        if dist <= _delta_samp and dist < best_dist:
+                            best_dist = dist
+                            best_gi = gi
+                    if best_gi >= 0:
+                        _tp += 1
+                        _gt_matched.add(best_gi)
+                        _latencies.append(best_dist)
+                    else:
+                        _fp += 1
+
             # Capture membrane state for visualization
             l1_membrane_snapshot = pipeline_obj.template.mem.tolist()
 
@@ -402,6 +447,22 @@ async def _process_stream(
                 if pipeline_obj and pipeline_obj.dec_layer is not None:
                     broadcast_msg["dec_spikes"] = sorted(dec_spike_set)
                     broadcast_msg["dec_hex"] = f"0x{pipeline_obj.dec_layer.hex_output:04X}"
+                if _has_gt and (_tp + _fp + _fn) > 0:
+                    _p = _tp / (_tp + _fp) if (_tp + _fp) > 0 else 0.0
+                    _r = _tp / (_tp + _fn) if (_tp + _fn) > 0 else 0.0
+                    _fh = (1.25 * _p * _r) / (0.25 * _p + _r) if (_p + _r) > 0 else 0.0
+                    _lat = (np.mean(_latencies) / _native_fs * 1000) if _latencies else 0.0
+                    broadcast_msg["accuracy"] = {
+                        "precision": round(_p, 4),
+                        "recall": round(_r, 4),
+                        "f_half": round(_fh, 4),
+                        "tp": _tp,
+                        "fp": _fp,
+                        "fn": _fn,
+                        "latency_ms": round(_lat, 2),
+                        "n_gt": len(_all_gt),
+                        "gt_progress": round(_gt_ptr / len(_all_gt), 4) if len(_all_gt) > 0 else 0,
+                    }
                 await _broadcast(json.dumps(broadcast_msg))
                 sample_buf.clear()
                 dn_buf.clear()
@@ -417,6 +478,18 @@ async def _process_stream(
         f"\n   🏁 Finished: {step_count} processed samples "
         f"in {elapsed_total:.1f}s"
     )
+    if _has_gt:
+        # Count remaining unmatched GT spikes as FN
+        while _gt_ptr < len(_all_gt):
+            if _gt_ptr not in _gt_matched:
+                _fn += 1
+            _gt_ptr += 1
+        _p = _tp / (_tp + _fp) if (_tp + _fp) > 0 else 0.0
+        _r = _tp / (_tp + _fn) if (_tp + _fn) > 0 else 0.0
+        _fh = (1.25 * _p * _r) / (0.25 * _p + _r) if (_p + _r) > 0 else 0.0
+        _lat = (np.mean(_latencies) / _native_fs * 1000) if _latencies else 0.0
+        print(f"   📊 Final accuracy — P:{_p:.3f}  R:{_r:.3f}  F½:{_fh:.3f}")
+        print(f"      TP:{_tp}  FP:{_fp}  FN:{_fn}  Latency:{_lat:.2f}ms")
 
 
 # ── Sample sources (async iterables) ─────────────────────────────────────────
@@ -574,6 +647,7 @@ async def _launch_mode(mode: str, **kwargs) -> dict:
                     "Run: uv pip install -e '.[eval]'",
                 }
             from dataclasses import replace as _repl
+            import spikeinterface.full as si
 
             syn = cfg.synthetic
             if kwargs:
@@ -586,16 +660,41 @@ async def _launch_mode(mode: str, **kwargs) -> dict:
                     ),
                 )
             cfg = _repl(cfg, synthetic=syn, sampling_rate_hz=syn.fs)
-            source = _synthetic_source(cfg)
+
+            # Generate recording with ground truth for live accuracy
+            print(f"   🧪 Generating synthetic recording …")
+            print(f"      Duration : {syn.duration_s} s  |  Fs : {syn.fs} Hz")
+            print(f"      Units    : {syn.num_units}  |  Noise : {syn.noise_level}")
+
+            recording, sorting = si.generate_ground_truth_recording(
+                durations=[syn.duration_s],
+                sampling_frequency=float(syn.fs),
+                num_channels=1,
+                num_units=syn.num_units,
+                noise_kwargs={"noise_levels": syn.noise_level, "strategy": "on_the_fly"},
+                dtype="float32",
+                seed=syn.seed,
+            )
+            gt_trains = {}
+            for uid in sorting.unit_ids:
+                train = sorting.get_unit_spike_train(unit_id=uid, segment_index=0)
+                gt_trains[int(uid)] = train
+                rate = len(train) / syn.duration_s
+                print(f"      Unit {uid}: {len(train)} spikes ({rate:.1f} Hz)")
+            n_gt = sum(len(t) for t in gt_trains.values())
+
+            traces = recording.get_traces(segment_index=0)[:, 0]
+            source = _array_source(traces, float(syn.fs), "synthetic")
             _stream_task = asyncio.create_task(
                 _process_stream(
                     cfg,
                     source,
                     pace_realtime=syn.realtime,
                     pace_fs=float(syn.fs),
+                    gt_spike_trains=gt_trains,
                 )
             )
-            return {"status": "ok", "mode": "synthetic"}
+            return {"status": "ok", "mode": "synthetic", "gt_spikes": n_gt}
 
         elif mode == "file":
             file_path = kwargs.get("file_path", "")

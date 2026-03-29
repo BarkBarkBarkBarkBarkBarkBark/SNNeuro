@@ -92,6 +92,15 @@ raw electrode signal (80 kHz UDP / LSL / synthetic)
 | `docs/manifesto.json` | Machine-readable project contract | — | I/O protocols, file roles, extension points. |
 | `data/best_config.json` | Current best hyperparameters | — | Updated by optimizer runs. Contains params, score, and all metrics. |
 
+## Remote / embedded (Jetson)
+
+- Browser: open `http://<host>:8080`; WS uses the page host (not hard-coded
+  `localhost`). CLI: `--http-port`, `--ws-port` if defaults are busy.
+- Multichannel: `broadcast_max_hz_mc` caps JSON broadcast rate; preprocessor
+  uses vectorized `sosfilt` across channels in `ChannelBank.step_preprocess_chunk`.
+- DEC path: `BatchedDECLayer` keeps delay state on GPU; avoid per-step full
+  `l1.cpu().numpy()` except where the CPU decoder needs NumPy.
+
 ## Key Conventions for Agents
 
 1. **Config is frozen** — never mutate. Use `cfg.with_overrides()` or `Config.from_flat()`.

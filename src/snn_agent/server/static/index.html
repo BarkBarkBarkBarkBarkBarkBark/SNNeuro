@@ -285,6 +285,123 @@ canvas {
 .acc-fp { color: #ff3333 !important; }
 .acc-fn { color: #ff6600 !important; }
 .acc-lat { color: #00ccff !important; }
+
+/* ── Multi-channel overview grid ───────────────────────── */
+#channel_grid {
+  display: none;
+  margin: 8px 0;
+  padding: 8px;
+  background: #0a0a0a;
+  border: 1px solid #1a1a1a;
+  border-radius: 3px;
+}
+#channel_grid.active { display: block; }
+
+.interpret-strip {
+  margin: 6px 0 10px 0;
+  padding: 8px 10px;
+  background: #0a0a0a;
+  border: 1px solid #1c1c1c;
+  border-radius: 4px;
+  font-size: 0.62rem;
+  color: #555;
+  line-height: 1.5;
+  letter-spacing: 0.5px;
+}
+.interpret-strip .interp-k { color: #3a5a3a; }
+.interpret-strip .interp-v { color: #00ccaa; }
+.interpret-strip .interp-on { color: #00ff41; }
+.interpret-strip .interp-off { color: #444; }
+
+#ch_hm_wrap {
+  display: none;
+  margin-bottom: 6px;
+}
+#ch_hm_wrap.active { display: block; }
+#ch_hm_label {
+  color: #3a3a3a;
+  font-size: 0.6rem;
+  letter-spacing: 2px;
+  margin-bottom: 2px;
+}
+.ch-grid-head { margin-bottom: 6px; }
+.ch-grid-title {
+  color: #3a3a3a;
+  font-size: 0.65rem;
+  letter-spacing: 2px;
+  margin-bottom: 4px;
+}
+.ch-grid-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.6rem;
+}
+.ch-selected-pill {
+  color: #00ff41;
+  font-family: monospace;
+  letter-spacing: 1px;
+}
+.ch-overview-opt {
+  color: #555;
+  cursor: pointer;
+  user-select: none;
+}
+.ch-overview-opt input { vertical-align: middle; margin-right: 4px; }
+.ch-grid-wrap { display: flex; flex-direction: column; gap: 8px; }
+.ch-probe-row { border-left: 2px solid #1a2a1a; padding-left: 6px; }
+.ch-probe-label {
+  font-size: 0.55rem;
+  color: #4a6a4a;
+  letter-spacing: 1px;
+  margin-bottom: 3px;
+}
+.ch-probe-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  gap: 4px;
+}
+.ch-card {
+  background: #050505;
+  border: 1px solid #1a1a1a;
+  border-radius: 2px;
+  padding: 3px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.ch-card:hover { border-color: #333; }
+.ch-card.selected { border-color: #00ff41; }
+.ch-card-hdr {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.55rem;
+  color: #555;
+  margin-bottom: 2px;
+}
+.ch-card-hdr .ch-id { color: #888; }
+.ch-card-hdr .ch-dn { width: 6px; height: 6px; border-radius: 50%; background: #111; }
+.ch-card-hdr .ch-dn.firing { background: #00ff41; }
+.ch-card canvas {
+  display: block;
+  width: 100%;
+  height: 28px;
+  image-rendering: pixelated;
+}
+.ch-card-ftr {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.5rem;
+  color: #444;
+  margin-top: 1px;
+}
+.ch-card-ftr .ch-spk { color: #ff6600; }
+.ch-card-ftr .ch-hex { color: #00ccff; font-family: monospace; }
+
+/* ── Convergence heatmap ─────────────────────────────── */
+#conv_panel { display: none; margin-top: 4px; }
+#conv_panel.active { display: block; }
 </style>
 </head>
 <body>
@@ -312,6 +429,30 @@ canvas {
   <div id="launcher_msg"></div>
 </div>
 
+<div id="interpret_strip" class="interpret-strip">
+  <span class="interp-k">effective_fs</span> <span class="interp-v" id="interp_fs">— Hz</span>
+  &nbsp;|&nbsp; <span class="interp-k">DN (sel. ch)</span> <span id="interp_dn" class="interp-off">—</span>
+  &nbsp;|&nbsp; <span class="interp-k">DEC gate / output</span> <span id="interp_dec" class="interp-off">—</span>
+  <br><span style="color:#383838;font-size:0.58rem;">DEC learns only while the DN gate is open after a detection (config <code>dec.dn_window_ms</code>). Empty L1/DEC with quiet DN is expected on noise.</span>
+</div>
+
+<div id="ch_hm_wrap">
+  <div id="ch_hm_label">ALL-CHANNEL L1 ACTIVITY (per broadcast window, brighter = more L1 spikes)</div>
+  <canvas id="ch_hm" width="900" height="22"></canvas>
+</div>
+
+<!-- ── Multi-Channel Overview Grid ─────────────────────── -->
+<div id="channel_grid">
+  <div class="ch-grid-head">
+    <div class="ch-grid-title">CHANNEL OVERVIEW — click a card to inspect</div>
+    <div class="ch-grid-meta">
+      <span id="ch_selected_label" class="ch-selected-pill">selected: ch0</span>
+      <label class="ch-overview-opt"><input type="checkbox" id="ch_overview_light"> Light WS (no membrane / DEC list)</label>
+    </div>
+  </div>
+  <div class="ch-grid-wrap" id="ch_grid_wrap"></div>
+</div>
+
 <div class="main-layout">
 <div class="signal-col">
 
@@ -334,6 +475,12 @@ canvas {
 <!-- DEC spike raster (16 spiking decoder neurons) -->
 <div class="panel-label" id="dec_label">DECODER LAYER (DEC × 16)</div>
 <canvas id="dec_cv" width="900" height="48"></canvas>
+
+<!-- Convergence layer heatmap (multi-channel only) -->
+<div id="conv_panel">
+<div class="panel-label">CONVERGENCE — CROSS-CHANNEL STATE NEURONS</div>
+<canvas id="conv_cv" width="900" height="48"></canvas>
+</div>
 
 <!-- Control signal trace -->
 <div class="panel-label">CONTROL SIGNAL</div>
@@ -381,7 +528,12 @@ canvas {
 </div><!-- /signal-col -->
 
 <div class="network-col">
-<div class="panel-label">NETWORK TOPOLOGY</div>
+<div class="panel-label" style="display:flex;align-items:center;justify-content:space-between;">
+  NETWORK TOPOLOGY
+  <label style="font-size:0.55rem;color:#444;cursor:pointer;font-weight:normal;letter-spacing:0;">
+    <input type="checkbox" id="net_toggle" checked style="vertical-align:middle;"> show
+  </label>
+</div>
 <canvas id="network_cv" width="360" height="520"></canvas>
 </div>
 
@@ -474,6 +626,8 @@ canvas {
 <script>
 // ── Config ────────────────────────────────────────────────────────────────────
 const WS_PORT    = 8765;
+/** Same host as the page (fixes remote browser: ws://localhost was wrong). */
+const WS_HOST    = window.location.hostname || 'localhost';
 const N_L1       = 110;
 const N_DEC      = 16;
 const CVW        = 900;
@@ -531,6 +685,133 @@ clearCv(decCtx,  CVW, DEC_H);
 clearCv(ctrlCtx, CVW, CTRL_H);
 clearCv(netCtx,  NET_W, NET_H);
 
+// ── Multi-channel state ──────────────────────────────────────────────────────
+let nChannels = 1;
+let selectedCh = 0;
+const chCards = [];      // {canvas, ctx, dnDot, spkEl, hexEl, waveY}
+const chWaveMax = {};
+/** Main waveform scale per selected channel (avoids amplitude jump on switch). */
+const chWaveHistory = {};
+const CARD_W = 100;
+const CARD_H = 28;
+let probeSize = 8;
+let nProbes = 1;
+let pendingProbeConvergence = null;
+let pendingGlobalConvergence = null;
+/** From server; size heatmaps when arrays not yet sent. */
+let convNLocal = 16;
+let convNGlobal = 32;
+let wantServerVizDetail = true;
+let lastChSummary = null;
+let lastEffectiveFs = null;
+let chHeatMax = 1;
+
+const convCv  = document.getElementById('conv_cv');
+const convCtx = convCv.getContext('2d');
+const CONV_H  = 48;
+
+function buildChannelGrid(C, ps) {
+  if (C <= 1) {
+    document.getElementById('ch_hm_wrap').classList.remove('active');
+    return;
+  }
+  nChannels = C;
+  document.getElementById('ch_hm_wrap').classList.add('active');
+  probeSize = Math.max(1, ps || probeSize);
+  nProbes = Math.ceil(C / probeSize);
+  const wrap = document.getElementById('ch_grid_wrap');
+  wrap.innerHTML = '';
+  chCards.length = 0;
+  for (let p = 0; p < nProbes; p++) {
+    const row = document.createElement('div');
+    row.className = 'ch-probe-row';
+    const lab = document.createElement('div');
+    lab.className = 'ch-probe-label';
+    lab.textContent = 'PROBE ' + p + ' — ch ' + (p * probeSize) + '–' + (Math.min((p + 1) * probeSize, C) - 1);
+    row.appendChild(lab);
+    const inner = document.createElement('div');
+    inner.className = 'ch-probe-cards';
+    const ch0 = p * probeSize;
+    const ch1 = Math.min((p + 1) * probeSize, C);
+    for (let i = ch0; i < ch1; i++) {
+      const card = document.createElement('div');
+      card.className = 'ch-card' + (i === selectedCh ? ' selected' : '');
+      card.innerHTML =
+        '<div class="ch-card-hdr"><span class="ch-id">ch' + i + '</span><div class="ch-dn" id="chdn_' + i + '"></div></div>' +
+        '<canvas id="chcv_' + i + '" width="' + CARD_W + '" height="' + CARD_H + '"></canvas>' +
+        '<div class="ch-card-ftr"><span class="ch-spk" id="chspk_' + i + '">0</span><span class="ch-hex" id="chhex_' + i + '">0000</span></div>';
+      card.addEventListener('click', () => selectChannel(i));
+      inner.appendChild(card);
+      const cv = document.getElementById('chcv_' + i);
+      const ctx = cv.getContext('2d');
+      ctx.fillStyle = '#020202';
+      ctx.fillRect(0, 0, CARD_W, CARD_H);
+      chCards[i] = {
+        el: card, canvas: cv, ctx: ctx,
+        dnDot: document.getElementById('chdn_' + i),
+        spkEl: document.getElementById('chspk_' + i),
+        hexEl: document.getElementById('chhex_' + i),
+        prevY: CARD_H / 2,
+      };
+      chWaveMax[i] = 1e-6;
+    }
+    row.appendChild(inner);
+    wrap.appendChild(row);
+  }
+  document.getElementById('channel_grid').classList.add('active');
+  document.getElementById('conv_panel').classList.add('active');
+  clearCv(convCtx, CVW, CONV_H);
+  updateSelectedChLabel();
+}
+
+function effectiveClientWantsVizDetail() {
+  const ov = document.getElementById('ch_overview_light');
+  if (ov && ov.checked) return false;
+  if (document.visibilityState === 'hidden') return false;
+  return true;
+}
+
+function syncVizDetailToServer() {
+  const want = effectiveClientWantsVizDetail();
+  if (want === wantServerVizDetail) return;
+  wantServerVizDetail = want;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ viz_detail: want }));
+  }
+}
+
+function updateSelectedChLabel() {
+  const sellab = document.getElementById('ch_selected_label');
+  if (sellab) sellab.textContent = 'selected: ch' + selectedCh;
+}
+
+function selectChannel(ch) {
+  if (ch === selectedCh) return;
+  chWaveHistory[selectedCh] = { waveMax, prevY };
+  if (chCards[selectedCh]) chCards[selectedCh].el.classList.remove('selected');
+  const ov = document.getElementById('ch_overview_light');
+  if (ov) ov.checked = false;
+  selectedCh = ch;
+  if (chCards[ch]) chCards[ch].el.classList.add('selected');
+  wantServerVizDetail = effectiveClientWantsVizDetail();
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ select_channel: ch, viz_detail: wantServerVizDetail }));
+  }
+  updateSelectedChLabel();
+  if (chCards[ch] && chCards[ch].el) {
+    chCards[ch].el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+  clearCv(waveCtx, CVW, WAVE_H);
+  clearCv(dnCtx, CVW, DN_H);
+  clearCv(ngCtx, CVW, NG_H);
+  clearCv(rastCtx, CVW, RASTER_H);
+  clearCv(decCtx, CVW, DEC_H);
+  clearCv(ctrlCtx, CVW, CTRL_H);
+  const saved = chWaveHistory[ch] || { waveMax: 1e-6, prevY: WAVE_H / 2 };
+  waveMax = saved.waveMax;
+  prevY = saved.prevY;
+}
+
 // ── Pending data from WebSocket ───────────────────────────────────────────────
 let pendingSpikes    = [];
 let pendingDECSpikes = [];
@@ -541,6 +822,8 @@ let pendingControl   = 0;
 let pendingNoiseGate = 1.0;
 let pendingInhActive = false;
 let pendingMembrane  = [];
+let pendingChannels  = null;
+let pendingConvergence = null;
 let hasNew           = false;
 
 // Waveform state
@@ -555,21 +838,88 @@ let netInhActive = false;
 let netL1Spikes = new Set();
 let netDECSpikes = new Set();
 
-function drawNetworkViz() {
+/** Probe rows + convergence strips; clipped to [yTop, yBottom). */
+function drawProbeSummaryTopology(yTop, yBottom) {
   const ctx = netCtx;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, yTop, NET_W, yBottom - yTop);
+  ctx.clip();
   ctx.fillStyle = '#020202';
-  ctx.fillRect(0, 0, NET_W, NET_H);
+  ctx.fillRect(0, yTop, NET_W, yBottom - yTop);
 
-  const cx = NET_W / 2;
+  const chans = pendingChannels || [];
+  const ps = probeSize || 8;
+  const nP = nProbes || Math.max(1, Math.ceil(nChannels / ps));
+  let y = yTop + 4;
+  ctx.font = '7px Courier New';
+  ctx.textAlign = 'left';
+
+  for (let p = 0; p < nP; p++) {
+    const stripH = 5;
+    if (y + 26 + stripH + 8 > yBottom - 32) break;
+    ctx.fillStyle = '#5a7a5a';
+    ctx.fillText('PROBE ' + p, 4, y + 8);
+    const ch0 = p * ps;
+    const ch1 = Math.min((p + 1) * ps, nChannels);
+    const nch = ch1 - ch0;
+    const rowCY = y + 16;
+    const span = NET_W - 28;
+    const gap = nch > 0 ? span / nch : span;
+    for (let k = 0; k < nch; k++) {
+      const ch = ch0 + k;
+      const info = chans.find(c => c.ch === ch) || {};
+      const cx = 26 + k * gap + gap * 0.5;
+      let fill = '#2a2a2a';
+      const hx = (info.dec_hex || '').toLowerCase();
+      if (hx && hx !== '0x0000' && hx !== '0000') {
+        const u = parseInt(hx.replace(/^0x/, ''), 16) || 0;
+        fill = `hsl(${(u * 37) % 360}, 85%, 52%)`;
+      } else if (info.n_spikes > 0) fill = '#ff8800';
+      else if (info.dn) fill = '#00ff66';
+      ctx.beginPath();
+      ctx.arc(cx, rowCY, 3.2, 0, Math.PI * 2);
+      ctx.fillStyle = fill;
+      ctx.fill();
+    }
+    y += 26;
+    const loc = (pendingProbeConvergence && pendingProbeConvergence[p]) || [];
+    const nLoc = Math.max(loc.length, convNLocal, 1);
+    const stripW = (NET_W - 16) / nLoc;
+    for (let i = 0; i < nLoc; i++) {
+      const v = Number(loc[i] ?? 0) > 0.5;
+      ctx.fillStyle = v ? `hsl(${(i / nLoc) * 300}, 100%, 55%)` : '#080808';
+      ctx.fillRect(8 + i * stripW, y, Math.max(1, stripW - 0.5), stripH);
+    }
+    y += stripH + 8;
+  }
+  if (y < yBottom - 22) {
+    ctx.fillStyle = '#777';
+    ctx.fillText('GLOBAL', 4, y + 6);
+    y += 12;
+    const glob = pendingGlobalConvergence || [];
+    const nG = Math.max(glob.length, convNGlobal, 1);
+    const gw = (NET_W - 16) / nG;
+    const gh = Math.max(4, yBottom - y - 6);
+    for (let i = 0; i < nG; i++) {
+      const v = Number(glob[i] ?? 0) > 0.5;
+      ctx.fillStyle = v ? `hsl(${(i / nG) * 300}, 100%, 58%)` : '#080808';
+      ctx.fillRect(8 + i * gw, y, Math.max(1, gw - 0.5), gh);
+    }
+  }
+  ctx.fillStyle = '#444';
+  ctx.font = '6px Courier New';
+  ctx.fillText('hue=DEC  orange=L1  green=DN  gray=quiet', 4, yBottom - 4);
+  ctx.restore();
+}
+
+/** Single-channel ENC→DEC column diagram in logical 360×520 space. */
+function drawColumnTopologyCore(ctx) {
   const margin = 25;
-
-  // Column positions
   const colX = [50, 130, 210, 290];
-
-  // ── Draw connections first (behind nodes) ──────────────────
-  ctx.globalAlpha = 0.08;
-  // DN → L1 connections
   const dnY = 80;
+
+  ctx.globalAlpha = 0.08;
   for (let i = 0; i < Math.min(N_L1, 40); i++) {
     const ly = 160 + i * (300 / Math.min(N_L1, 40));
     ctx.strokeStyle = netDNActive ? '#ff6600' : '#222';
@@ -581,24 +931,18 @@ function drawNetworkViz() {
   }
   ctx.globalAlpha = 1.0;
 
-  // ── Encoder column (left) ──────────────────────────────────
   ctx.fillStyle = '#333';
   ctx.font = '9px Courier New';
   ctx.textAlign = 'center';
   ctx.fillText('ENC', colX[0], margin - 5);
-
-  // Draw a small bundle of afferent lines
   for (let i = 0; i < 20; i++) {
     const y = 40 + i * 22;
     ctx.fillStyle = '#1a3a1a';
     ctx.fillRect(colX[0] - 3, y, 6, 3);
   }
 
-  // ── DN + NoiseGate column (middle-left) ────────────────────
   ctx.fillStyle = '#444';
   ctx.fillText('DN', colX[1], margin - 5);
-
-  // DN node
   ctx.beginPath();
   ctx.arc(colX[1], dnY, 12, 0, Math.PI * 2);
   if (netDNActive) {
@@ -615,12 +959,10 @@ function drawNetworkViz() {
   ctx.lineWidth = 1;
   ctx.stroke();
 
-  // Noise Gate node
   ctx.fillStyle = '#444';
   ctx.fillText('NG', colX[1], 130);
   ctx.beginPath();
   ctx.arc(colX[1], 150, 10, 0, Math.PI * 2);
-
   const ngColor = netNGFactor < 0.95 ? '#ff33cc' : '#1a0a1a';
   ctx.fillStyle = ngColor;
   if (netNGFactor < 0.95) {
@@ -633,13 +975,11 @@ function drawNetworkViz() {
   ctx.lineWidth = 1;
   ctx.stroke();
 
-  // Noise gate factor bar
   ctx.fillStyle = '#111';
   ctx.fillRect(colX[1] - 15, 170, 30, 6);
   ctx.fillStyle = netNGFactor < 0.5 ? '#ff33cc' : '#1a3a1a';
   ctx.fillRect(colX[1] - 15, 170, 30 * netNGFactor, 6);
 
-  // Inhibition indicator
   ctx.fillStyle = '#444';
   ctx.fillText('INH', colX[1], 195);
   ctx.beginPath();
@@ -652,27 +992,19 @@ function drawNetworkViz() {
   ctx.lineWidth = 1;
   ctx.stroke();
 
-  // ── L1 column (middle-right) ───────────────────────────────
   ctx.fillStyle = '#444';
   ctx.fillText('L1', colX[2], margin - 5);
-
   const nVis = Math.min(N_L1, 40);
-  const l1StartY = 40;
   const l1Spacing = 300 / nVis;
-
   for (let i = 0; i < nVis; i++) {
     const neuronIdx = Math.floor(i * N_L1 / nVis);
-    const y = l1StartY + i * l1Spacing;
+    const y = 40 + i * l1Spacing;
     const r = 3;
-
-    // Membrane potential → color intensity
     const mem = netMembrane[neuronIdx] || 0;
     const intensity = Math.min(1, Math.max(0, mem / 500));
     const fired = netL1Spikes.has(neuronIdx);
-
     ctx.beginPath();
     ctx.arc(colX[2], y, r, 0, Math.PI * 2);
-
     if (fired) {
       ctx.fillStyle = '#00ff41';
       ctx.shadowColor = '#00ff41';
@@ -686,18 +1018,15 @@ function drawNetworkViz() {
     ctx.shadowBlur = 0;
   }
 
-  // ── DEC column (right) — 16 spiking decoder neurons ────────
   ctx.fillStyle = '#444';
+  ctx.textAlign = 'center';
   ctx.fillText('DEC', colX[3], margin - 5);
-
-  // Neuron 0 = any-fire (white, larger), 1–15 = unit neurons (rainbow)
   for (let i = 0; i < N_DEC; i++) {
     const y = 40 + i * 28;
     const fired = netDECSpikes.has(i);
     const r = i === 0 ? 6 : 4;
     const col = DEC_COLORS[i];
-    const dimCol = i === 0 ? '#1a1a1a' : `hsl(${((i-1)/(N_DEC-1))*300}, 30%, 12%)`;
-
+    const dimCol = i === 0 ? '#1a1a1a' : `hsl(${((i - 1) / (N_DEC - 1)) * 300}, 30%, 12%)`;
     ctx.beginPath();
     ctx.arc(colX[3], y, r, 0, Math.PI * 2);
     ctx.fillStyle = fired ? col : dimCol;
@@ -707,8 +1036,6 @@ function drawNetworkViz() {
     ctx.strokeStyle = col;
     ctx.lineWidth = i === 0 ? 1.5 : 0.5;
     ctx.stroke();
-
-    // Label neuron 0
     if (i === 0) {
       ctx.fillStyle = '#666';
       ctx.font = '7px Courier New';
@@ -718,23 +1045,21 @@ function drawNetworkViz() {
     }
   }
 
-  // Hex output below DEC neurons
   ctx.fillStyle = '#00ccff';
   ctx.font = '10px Courier New';
+  ctx.textAlign = 'center';
   ctx.fillText(pendingDECHex, colX[3], 40 + N_DEC * 28 + 15);
 
-  // ── Legend ─────────────────────────────────────────────────
   const legY = NET_H - 50;
   ctx.font = '8px Courier New';
   ctx.textAlign = 'left';
-
   const legends = [
-    { color: '#ff6600', label: 'DN active' },
-    { color: '#ff33cc', label: 'Noise suppressing' },
-    { color: '#ff3333', label: 'Inhibition active' },
-    { color: '#00ff41', label: 'L1 spike' },
-    { color: '#ffffff', label: 'DEC any-fire' },
-    { color: '#00ccff', label: 'DEC unit' },
+    { color: '#ff6600', label: 'DN (attention) firing' },
+    { color: '#ff33cc', label: 'Noise gate suppressing' },
+    { color: '#ff3333', label: 'Global inhibition' },
+    { color: '#00ff41', label: 'L1 template spike' },
+    { color: '#ffffff', label: 'DEC neuron 0 (any-fire)' },
+    { color: '#00ccff', label: 'DEC units 1–15' },
   ];
   legends.forEach((l, i) => {
     const x = 15;
@@ -746,18 +1071,144 @@ function drawNetworkViz() {
   });
 }
 
+function drawColumnTopologyViewport(topY) {
+  const availH = NET_H - topY - 2;
+  if (availH < 40) return;
+  netCtx.fillStyle = '#020202';
+  netCtx.fillRect(0, topY, NET_W, availH);
+  netCtx.fillStyle = '#4a6a4a';
+  netCtx.font = '7px Courier New';
+  netCtx.textAlign = 'left';
+  netCtx.fillText('SELECTED ch' + selectedCh + ' — path', 6, topY + 10);
+  const innerTop = topY + 14;
+  const innerH = availH - 16;
+  const s = Math.min(NET_W / NET_W, innerH / NET_H);
+  const ox = (NET_W - NET_W * s) / 2;
+  const oy = innerTop + (innerH - NET_H * s) / 2;
+  netCtx.save();
+  netCtx.translate(ox, oy);
+  netCtx.scale(s, s);
+  drawColumnTopologyCore(netCtx);
+  netCtx.restore();
+}
+
+function drawNetworkViz() {
+  clearCv(netCtx, NET_W, NET_H);
+  if (nChannels > 1) {
+    const sumH = Math.min(
+      Math.floor(NET_H * 0.48),
+      20 + nProbes * 46 + 48
+    );
+    const splitY = Math.max(120, Math.min(sumH, NET_H - 160));
+    drawProbeSummaryTopology(0, splitY);
+    netCtx.strokeStyle = '#2a2a2a';
+    netCtx.lineWidth = 1;
+    netCtx.beginPath();
+    netCtx.moveTo(0, splitY);
+    netCtx.lineTo(NET_W, splitY);
+    netCtx.stroke();
+    drawColumnTopologyViewport(splitY + 2);
+    return;
+  }
+  drawColumnTopologyCore(netCtx);
+}
+
 // Initial network draw
 drawNetworkViz();
+
+// ── Network visibility toggle ──────────────────────────────────────────
+let networkVisible = true;
+const netToggle = document.getElementById('net_toggle');
+if (netToggle) {
+  netToggle.addEventListener('change', () => {
+    networkVisible = netToggle.checked;
+    netCv.style.display = networkVisible ? '' : 'none';
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ network_visible: networkVisible }));
+    }
+  });
+}
+
+// ── Per-channel mini spike-histogram renderer ────────────────────────
+function drawChCardHist(card, hist) {
+  const ctx = card.ctx;
+  const W = CARD_W;
+  const H = CARD_H;
+  ctx.fillStyle = '#020202';
+  ctx.fillRect(0, 0, W, H);
+  const n = hist.length;
+  if (!n) return;
+  const bw = W / n;
+  let maxV = 1;
+  for (let i = 0; i < n; i++) if (hist[i] > maxV) maxV = hist[i];
+  for (let i = 0; i < n; i++) {
+    const h = (hist[i] / maxV) * (H - 2);
+    if (h < 0.5) continue;
+    ctx.fillStyle = '#00ff41';
+    ctx.fillRect(Math.floor(i * bw), H - h - 1, Math.max(1, Math.ceil(bw) - 1), h);
+  }
+}
+
+function drawChActivityHeatmap() {
+  const wrap = document.getElementById('ch_hm_wrap');
+  const cv = document.getElementById('ch_hm');
+  if (!wrap || !cv || !wrap.classList.contains('active')) return;
+  if (!lastChSummary || lastChSummary.length === 0) return;
+  const ctx = cv.getContext('2d');
+  const W = cv.width;
+  const H = cv.height;
+  ctx.fillStyle = '#020202';
+  ctx.fillRect(0, 0, W, H);
+  let mx = 0;
+  for (let i = 0; i < lastChSummary.length; i++) {
+    mx = Math.max(mx, lastChSummary[i].n_spikes);
+  }
+  chHeatMax = Math.max(chHeatMax * 0.992, mx, 1);
+  const n = lastChSummary.length;
+  const bw = W / n;
+  for (let i = 0; i < n; i++) {
+    const c = lastChSummary[i];
+    const frac = Math.min(1, c.n_spikes / chHeatMax);
+    const h = frac * (H - 2);
+    ctx.fillStyle = c.dn ? '#ff6600' : '#0d3018';
+    ctx.fillRect(
+      Math.floor(i * bw),
+      H - h - 1,
+      Math.max(1, Math.ceil(bw) - 1),
+      Math.max(0, h)
+    );
+  }
+}
 
 // ── Render loop ───────────────────────────────────────────────────────────────
 function render() {
   if (!hasNew) { requestAnimationFrame(render); return; }
   hasNew = false;
 
+  // Update channel grid regardless of sample availability
+  if (pendingChannels && chCards.length > 0) {
+    for (const ch of pendingChannels) {
+      const card = chCards[ch.ch];
+      if (!card) continue;
+      card.dnDot.className = 'ch-dn' + (ch.dn ? ' firing' : '');
+      card.spkEl.textContent = ch.n_spikes;
+      card.hexEl.textContent = ch.dec_hex ? ch.dec_hex.slice(2) : '0000';
+      if (ch.spk_hist) drawChCardHist(card, ch.spk_hist);
+    }
+    pendingChannels = null;
+  }
+
   const samples = pendingSamples;
   const dnFlags = pendingDNFlags;
   const N = samples.length;
-  if (N === 0) { requestAnimationFrame(render); return; }
+  if (N === 0) {
+    if (nChannels > 1) {
+      if (networkVisible) drawNetworkViz();
+      drawChActivityHeatmap();
+    }
+    requestAnimationFrame(render);
+    return;
+  }
 
   // ── Zoom: samples-per-pixel controls time window width ─────
   const spp = currentSPP;
@@ -908,12 +1359,35 @@ function render() {
       netMembrane[i] = pendingMembrane[i];
     }
   }
-  drawNetworkViz();
+  if (networkVisible) drawNetworkViz();
+
+  // ── Convergence heatmap (global state; tiered uses global_convergence) ───
+  const convData = (pendingGlobalConvergence && pendingGlobalConvergence.length)
+    ? pendingGlobalConvergence
+    : pendingConvergence;
+  if (convData && convData.length > 0) {
+    const cv = convData;
+    const nState = cv.length;
+    const rowH = Math.max(1, Math.floor(CONV_H / nState));
+    convCtx.drawImage(convCv, -shiftPx, 0);
+    for (let i = 0; i < nState; i++) {
+      const v = cv[i] ? 1 : 0;
+      convCtx.fillStyle = v ? `hsl(${(i / nState) * 300}, 100%, 55%)` : '#050505';
+      const y = Math.floor(i * CONV_H / nState);
+      convCtx.fillRect(CVW - shiftPx, y, shiftPx, rowH);
+    }
+    if (pendingGlobalConvergence && pendingGlobalConvergence.length) {
+      pendingGlobalConvergence = null;
+    } else {
+      pendingConvergence = null;
+    }
+  }
 
   pendingSamples = [];
   pendingDNFlags = [];
   pendingSpikes = [];
   pendingDECSpikes = [];
+  drawChActivityHeatmap();
   requestAnimationFrame(render);
 }
 requestAnimationFrame(render);
@@ -1095,10 +1569,12 @@ document.getElementById('btn_synthetic').addEventListener('click', () => {
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 let ws = null;
 function connect() {
-  ws = new WebSocket(`ws://localhost:${WS_PORT}`);
+  ws = new WebSocket(`ws://${WS_HOST}:${WS_PORT}`);
   ws.onopen = () => {
     document.getElementById('status').textContent = '● connected';
     document.getElementById('status').style.color = '#00ff41';
+    wantServerVizDetail = effectiveClientWantsVizDetail();
+    ws.send(JSON.stringify({ viz_detail: wantServerVizDetail }));
   };
   ws.onclose = () => {
     document.getElementById('status').textContent = '● disconnected — retrying in 2s…';
@@ -1108,6 +1584,21 @@ function connect() {
   ws.onerror = () => ws.close();
   ws.onmessage = ({ data }) => {
     const msg = JSON.parse(data);
+
+    if (msg.effective_fs !== undefined) {
+      document.getElementById('interp_fs').textContent = msg.effective_fs + ' Hz';
+    }
+    if (msg.dn_open_selected !== undefined) {
+      const el = document.getElementById('interp_dn');
+      el.textContent = msg.dn_open_selected ? 'OPEN (firing)' : 'quiet';
+      el.className = msg.dn_open_selected ? 'interp-on' : 'interp-off';
+    }
+    if (msg.dec_gate_active !== undefined) {
+      const el = document.getElementById('interp_dec');
+      el.textContent = msg.dec_gate_active ? 'active (non-zero hex)' : 'idle / gated';
+      el.className = msg.dec_gate_active ? 'interp-on' : 'interp-off';
+    }
+    if (msg.channels) lastChSummary = msg.channels;
 
     // ── Server responses (launch, status, file list) ──────
     if (msg.mode_change) {
@@ -1146,8 +1637,26 @@ function connect() {
     pendingControl   = msg.control ?? 0;
     pendingNoiseGate = msg.noise_gate ?? 1.0;
     pendingInhActive = msg.inhibition_active ?? false;
-    pendingMembrane  = msg.l1_membrane ?? [];
+    if ('l1_membrane' in msg) pendingMembrane = msg.l1_membrane || [];
     hasNew = true;
+
+    // Multi-channel: build grid on first message with n_channels > 1
+    if (msg.n_channels !== undefined && msg.n_channels > 1 && chCards.length === 0) {
+      buildChannelGrid(msg.n_channels, msg.probe_size);
+    }
+    if (msg.probe_size !== undefined) probeSize = msg.probe_size;
+    if (msg.n_probes !== undefined) nProbes = msg.n_probes;
+    if (msg.n_local_neurons !== undefined) convNLocal = msg.n_local_neurons;
+    if (msg.n_global_neurons !== undefined) convNGlobal = msg.n_global_neurons;
+    if (msg.channels) pendingChannels = msg.channels;
+    if (msg.probe_convergence) pendingProbeConvergence = msg.probe_convergence;
+    if (msg.global_convergence) pendingGlobalConvergence = msg.global_convergence;
+    if (msg.convergence) pendingConvergence = msg.convergence;
+    if (msg.selected_ch !== undefined) {
+      selectedCh = msg.selected_ch;
+      updateSelectedChLabel();
+    }
+    if (msg.viz_detail !== undefined) wantServerVizDetail = msg.viz_detail;
 
     // DEC spikes (16 spiking decoder neurons)
     if (msg.dec_spikes !== undefined) {
@@ -1189,6 +1698,11 @@ function connect() {
     }
   };
 }
+
+const chOverviewLight = document.getElementById('ch_overview_light');
+if (chOverviewLight) chOverviewLight.addEventListener('change', () => syncVizDetailToServer());
+document.addEventListener('visibilitychange', () => syncVizDetailToServer());
+
 connect();
 
 </script>

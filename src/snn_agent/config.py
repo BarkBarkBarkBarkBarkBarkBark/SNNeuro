@@ -83,6 +83,7 @@ class DecoderConfig:
 class LSLConfig:
     stream_name: str = "NCS-Replay"
     pick_channel: str | None = None
+    pick_channels: list[str] | None = None
     bufsize_sec: float = 5.0
     poll_interval_s: float = 0.0005
 
@@ -144,6 +145,26 @@ class DECConfig:
     dn_window_ms: float = 2.5    # keep DEC gate open N ms after each DN spike
 
 
+@dataclass(frozen=True, slots=True)
+class ConvergenceConfig:
+    """Cross-channel convergence: per-probe (local) then global ensemble states."""
+    enabled: bool = True
+    n_local_neurons: int = 16
+    n_global_neurons: int = 32
+    tm_samples: int = 15
+    refractory_samples: int = 6
+    threshold_factor: float = 0.3
+    wi_factor: float = 6.0
+    init_w_min: float = 0.2
+    init_w_max: float = 0.7
+    w_lo: float = 0.0
+    w_hi: float = 1.0
+    stdp_ltp: float = 0.01
+    stdp_ltp_window: int = 8
+    stdp_ltd: float = -0.005
+    freeze_stdp: bool = False
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Top-level config
 # ─────────────────────────────────────────────────────────────────────────────
@@ -180,12 +201,19 @@ class Config:
     inhibition: InhibitionConfig = field(default_factory=InhibitionConfig)
     noise_gate: NoiseGateConfig = field(default_factory=NoiseGateConfig)
     dec: DECConfig = field(default_factory=DECConfig)
+    convergence: ConvergenceConfig = field(default_factory=ConvergenceConfig)
+
+    # Multi-channel
+    n_channels: int = 1
+    probe_size: int = 8  # channels per stereotactic probe (grid + local convergence grouping)
+    device: str = "auto"  # "auto" | "cuda" | "cpu"
 
     # Feature flags
     use_dec: bool = True
 
-    # Viz
+    # Viz — single-channel uses broadcast_every; multichannel caps UI rate separately
     broadcast_every: int = 5
+    broadcast_max_hz_mc: float = 45.0  # max WebSocket frames/s when n_channels > 1
 
     # ── Convenience factories ─────────────────────────────────────────
     def to_dict_flat(self) -> dict:
@@ -220,6 +248,33 @@ class Config:
             return self.sampling_rate_hz // self.preprocess.decimation_factor
         return self.sampling_rate_hz
 
+    def multichannel_broadcast_stride(self) -> int:
+        """Steps between WS broadcasts — always applies Hz cap regardless of channel count."""
+        fs = float(self.effective_fs())
+        hz = max(1.0, float(self.broadcast_max_hz_mc))
+        cap = max(1, int(fs / hz + 0.999))  # ceil(fs / hz)
+        return max(self.broadcast_every, cap)
+
+    def resolve_device(self):
+        """Return a ``torch.device`` based on the ``device`` field.
+
+        Falls back to CPU with a warning if CUDA is requested but unavailable.
+        """
+        import torch
+        want_cuda = self.device == "cuda" or (
+            self.device == "auto" and torch.cuda.is_available()
+        )
+        if want_cuda:
+            if torch.cuda.is_available():
+                return torch.device("cuda")
+            import warnings
+            warnings.warn(
+                "CUDA requested but not available — falling back to CPU",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        return torch.device("cpu")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Flat-key mapping  (legacy CFG dict → structured Config)
@@ -234,6 +289,10 @@ _FLAT_MAP: dict[str, tuple[str | None, str]] = {
     "control_target_host": (None, "control_target_host"),
     "sampling_rate_hz": (None, "sampling_rate_hz"),
     "broadcast_every": (None, "broadcast_every"),
+    "broadcast_max_hz_mc": (None, "broadcast_max_hz_mc"),
+    "n_channels": (None, "n_channels"),
+    "probe_size": (None, "probe_size"),
+    "device": (None, "device"),
     # preprocess
     "enable_bandpass": ("preprocess", "enable_bandpass"),
     "bandpass_lo_hz": ("preprocess", "bandpass_lo_hz"),
@@ -277,6 +336,7 @@ _FLAT_MAP: dict[str, tuple[str | None, str]] = {
     # lsl
     "lsl_stream_name": ("lsl", "stream_name"),
     "lsl_pick_channel": ("lsl", "pick_channel"),
+    "lsl_pick_channels": ("lsl", "pick_channels"),
     "lsl_bufsize_sec": ("lsl", "bufsize_sec"),
     "lsl_poll_interval_s": ("lsl", "poll_interval_s"),
     # synthetic
@@ -315,6 +375,16 @@ _FLAT_MAP: dict[str, tuple[str | None, str]] = {
     "dec_dn_window_ms": ("dec", "dn_window_ms"),
     # noise gate extras
     "ng_ema_alpha": ("noise_gate", "ema_alpha"),
+    # convergence
+    "conv_enabled": ("convergence", "enabled"),
+    "conv_n_local_neurons": ("convergence", "n_local_neurons"),
+    "conv_n_global_neurons": ("convergence", "n_global_neurons"),
+    "conv_n_state_neurons": ("convergence", "n_global_neurons"),
+    "conv_tm_samples": ("convergence", "tm_samples"),
+    "conv_threshold_factor": ("convergence", "threshold_factor"),
+    "conv_stdp_ltp": ("convergence", "stdp_ltp"),
+    "conv_stdp_ltd": ("convergence", "stdp_ltd"),
+    "conv_freeze_stdp": ("convergence", "freeze_stdp"),
 }
 
 
@@ -354,6 +424,8 @@ def _from_flat(flat: dict) -> Config:
         top["noise_gate"] = NoiseGateConfig(**subs["noise_gate"])
     if "dec" in subs:
         top["dec"] = DECConfig(**subs["dec"])
+    if "convergence" in subs:
+        top["convergence"] = ConvergenceConfig(**subs["convergence"])
 
     return Config(**top)
 

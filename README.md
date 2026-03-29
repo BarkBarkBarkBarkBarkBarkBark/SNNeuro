@@ -76,6 +76,28 @@ open http://localhost:8080
 From the browser GUI you can launch a **synthetic recording** or **load a
 `.ncs` file** directly — no extra terminal needed.
 
+### Remote UI (e.g. Jetson on the LAN)
+
+The static page and WebSocket client use the **same host as the URL** you open
+(`window.location.hostname`), so from a laptop browse to
+`http://<device-ip>:8080` and the UI will connect to `ws://<device-ip>:8765` on
+the machine running `snn-serve`. You can also copy `index.html` (and assets)
+elsewhere and point the host at the agent if you prefer the browser not to load
+from the device.
+
+### Multichannel: performance and sensitivity
+
+- **UI load**: When `n_channels > 1`, WebSocket updates are **capped** by
+  `broadcast_max_hz_mc` (default 45 Hz) and `broadcast_every`; see
+  `Config.multichannel_broadcast_stride()` in `config.py`. Increase the stride
+  or lower `broadcast_max_hz_mc` if the CPU is saturated serializing JSON.
+- **DEC visibility**: The DEC layer only integrates while the **DN attention
+  gate** is open (see `dec.dn_window_ms` in `config.py`). Quiet DN → empty DEC
+  raster is expected on unstructured noise.
+- **Tuning (more sensitive outputs)**: `dec.any_fire_threshold`,
+  `dec.unit_threshold_factor`, `dec.dn_window_ms`, `decoder.threshold` /
+  strategy, `noise_gate.inhibit_below_sd`, and live **DN threshold** in the GUI.
+
 ## Input modes
 
 SNN Agent accepts signal from three sources.  You can switch between
@@ -87,6 +109,7 @@ synthetic and file modes live from the browser.
 | **File (.ncs)** | Enter a file path in the browser launcher and click ▶ LOAD FILE |
 | **LSL stream** | Start `snn-lsl data/raw/CSC285_0001.ncs` in a separate terminal, then `snn-serve` |
 | **Electrode (UDP)** | Feed real samples to UDP port 9001: `snn-serve --mode electrode` |
+| **Multi-Channel** | Run 8 channel: `snn-serve --mode synthetic --channels 8 --device cuda` |
 
 ### CLI commands
 

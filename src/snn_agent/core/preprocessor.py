@@ -80,3 +80,42 @@ class Preprocessor:
             self._dec_count = 0
 
         return [x]
+
+    def step_chunk(self, samples: np.ndarray) -> np.ndarray:
+        """
+        Ingest a chunk of raw samples for one channel.
+
+        Parameters
+        ----------
+        samples : ndarray [N]
+            Contiguous block of raw samples.
+
+        Returns
+        -------
+        ndarray [N_dec]
+            Bandpass-filtered, decimated output.  Length is
+            ``ceil((N - phase) / dec_factor)`` where *phase* is the
+            current decimation counter.
+        """
+        x = samples.astype(np.float64)
+
+        if self.do_bandpass:
+            x, self._zi = sosfilt(self._sos, x, zi=self._zi)
+
+        if self.do_decimate:
+            return self.decimate_chunk(x)
+
+        return x
+
+    def decimate_chunk(self, filtered_1d: np.ndarray) -> np.ndarray:
+        """Apply decimation only (``filtered_1d`` is already bandpassed if used)."""
+        x = np.asarray(filtered_1d, dtype=np.float64)
+        if not self.do_decimate:
+            return x
+        remaining = self.dec_factor - self._dec_count
+        if remaining > len(x):
+            self._dec_count += len(x)
+            return np.empty(0, dtype=np.float64)
+        keep_idx = np.arange(remaining - 1, len(x), self.dec_factor)
+        self._dec_count = (self._dec_count + len(x)) % self.dec_factor
+        return x[keep_idx]

@@ -81,9 +81,10 @@ class ControlDecoder:
         self._ttl_high = float(dec.ttl_high)
         self._ttl_countdown: int = 0  # samples remaining in current pulse
 
-        # DN confidence — sliding window
+        # DN confidence — sliding window with O(1) running sum
         dn_win = int(dec.dn_confidence_window_ms * 1e-3 * self._fs)
         self._dn_buf: deque[bool] = deque(maxlen=max(dn_win, 1))
+        self._dn_sum: int = 0  # running sum — updated incrementally, avoids sum(deque) each step
 
         self.t: int = 0
 
@@ -97,8 +98,11 @@ class ControlDecoder:
         Always returns ``(control_value, confidence)``.
         """
         self.t += 1
+        # O(1) running confidence: track evicted item before appending
+        evicted = self._dn_buf[0] if len(self._dn_buf) == self._dn_buf.maxlen else False
         self._dn_buf.append(dn_spike)
-        confidence = sum(self._dn_buf) / len(self._dn_buf)
+        self._dn_sum += int(dn_spike) - int(evicted)
+        confidence = self._dn_sum / len(self._dn_buf)
 
         if self.strategy == "discrete":
             return self._step_discrete(l1_spikes, dn_spike, confidence)
@@ -118,7 +122,7 @@ class ControlDecoder:
         self, spikes: np.ndarray, dn_spike: bool, confidence: float
     ) -> tuple[float, float]:
         """Clean 1/0: fires exactly on the step a spike+DN event occurs."""
-        if np.any(spikes) and dn_spike:
+        if spikes.any() and dn_spike:
             return (1.0, confidence)
         return (0.0, confidence)
 
@@ -127,7 +131,7 @@ class ControlDecoder:
     ) -> tuple[float, float]:
         """Fixed-width TTL pulse: goes high for ttl_width_ms, then low."""
         # New event restarts the pulse (extends if already high)
-        if np.any(spikes) and dn_spike:
+        if spikes.any() and dn_spike:
             self._ttl_countdown = self._ttl_width_samples
         if self._ttl_countdown > 0:
             self._ttl_countdown -= 1

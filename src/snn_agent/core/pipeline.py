@@ -20,7 +20,12 @@ from snn_agent.core.inhibition import GlobalInhibitor
 from snn_agent.core.noise_gate import NoiseGateNeuron
 from snn_agent.core.dec_layer import DECLayer
 
-__all__ = ["Pipeline", "build_pipeline", "complete_pipeline"]
+__all__ = [
+    "Pipeline",
+    "build_pipeline",
+    "complete_pipeline",
+    "build_multichannel",
+]
 
 
 class Pipeline(NamedTuple):
@@ -134,3 +139,31 @@ def complete_pipeline(
         dec_layer=dec_layer_obj,
         cfg=effective_cfg,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Multi-channel pipeline factory
+# ─────────────────────────────────────────────────────────────────────────────
+def build_multichannel(
+    cfg: Config,
+    *,
+    sampling_rate_override: int | None = None,
+):
+    """
+    Build a multi-channel ``ChannelBank`` (pre-calibration phase).
+
+    Returns ``(bank, effective_cfg)`` where *bank* contains C preprocessors
+    and C encoders ready to ingest samples.  After all encoders calibrate,
+    call ``bank.complete()`` to build the downstream GPU + CPU layers.
+    """
+    from snn_agent.core.multichannel import ChannelBank
+
+    if sampling_rate_override is not None:
+        cfg = cfg.with_overrides(sampling_rate_hz=sampling_rate_override)
+
+    ref_preproc = Preprocessor(cfg)
+    effective_cfg = cfg.with_overrides(sampling_rate_hz=ref_preproc.effective_fs)
+    device = cfg.resolve_device()
+
+    bank = ChannelBank(cfg, effective_cfg, device)
+    return bank, effective_cfg

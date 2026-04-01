@@ -1,0 +1,78 @@
+{% extends "dashboard/base.html" %}
+{% load static %}
+{% block title %}SNN Agent — Monitor{% endblock %}
+
+{% block content %}
+{% include "dashboard/partials/_launcher.html" %}
+
+<!-- ── Channel strip (auto-shown by channels.js when >1 channel) ──────── -->
+<div id="channel-strip" style="display:none;">
+  <!-- Cards are created dynamically by channels.js as data arrives -->
+</div>
+
+<div class="main-layout">
+  <div class="signal-col">
+    {% include "dashboard/partials/_waveform.html" %}
+    {% include "dashboard/partials/_stats_bar.html" %}
+  </div>
+  <div class="network-col">
+    {% include "dashboard/partials/_network_viz.html" %}
+  </div>
+</div>
+
+{% include "dashboard/partials/_controls.html" %}
+{% endblock %}
+
+{% block extra_scripts %}
+<script type="module">
+import { connect, sendCmd, sendRaw, onMessage } from "{% static 'dashboard/js/websocket.js' %}";
+import { init as wfInit, push as wfPush, setTimeWindow, setChannel as wfSetCh } from "{% static 'dashboard/js/waveform.js' %}";
+import { init as rastInit, push as rastPush, setTimeWindow as rastSetTW, setChannel as rastSetCh } from "{% static 'dashboard/js/raster.js' %}";
+import { init as netInit, update as netUpdate, setChannel as netSetCh } from "{% static 'dashboard/js/network_viz.js' %}";
+import { init as ctrlInit, initDNThreshold, getTimeWindowMs } from "{% static 'dashboard/js/controls.js' %}";
+import { update as statsUpdate, setChannel as statsSetCh } from "{% static 'dashboard/js/stats.js' %}";
+import { init as launcherInit, handleStatus } from "{% static 'dashboard/js/launcher.js' %}";
+import { init as chInit, update as chUpdate, getNumChannels } from "{% static 'dashboard/js/channels.js' %}";
+
+// ── Init renderers ─────────────────────────────────────────────────
+wfInit({ wave: 'wave', dn: 'dn_cv', ng: 'ng_cv', ctrl: 'ctrl_cv' });
+rastInit({ raster: 'raster', dec: 'dec_cv' });
+netInit('network_cv');
+ctrlInit(sendCmd);
+launcherInit(sendRaw, getNumChannels);
+
+// Always init channel system — cards auto-appear as data arrives,
+// strip auto-shows when more than 1 channel is detected.
+chInit(ch => {
+  wfSetCh(ch); rastSetCh(ch); netSetCh(ch); statsSetCh(ch);
+});
+
+// ── Time window slider ────────────────────────────────────────────
+window.addEventListener('timeWindowChange', e => {
+  setTimeWindow(e.detail);
+  rastSetTW(e.detail);
+});
+// Initialise to current slider value
+const initTW = getTimeWindowMs();
+setTimeWindow(initTW);
+rastSetTW(initTW);
+
+// ── Message routing ────────────────────────────────────────────────
+onMessage('stream', msg => {
+  wfPush(msg);
+  rastPush(msg);
+  netUpdate(msg);
+  statsUpdate(msg);
+  chUpdate(msg);
+
+  // DN threshold auto-init from first broadcast
+  if (msg.dn_th !== undefined) initDNThreshold(msg.dn_th);
+});
+
+onMessage('status',      handleStatus);
+onMessage('mode_change', handleStatus);
+onMessage('files',       handleStatus);
+
+connect();
+</script>
+{% endblock %}

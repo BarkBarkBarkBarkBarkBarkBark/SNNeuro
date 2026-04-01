@@ -1,0 +1,83 @@
+<!-- _controls.html — Parameter controls panel partial -->
+<div id="controls">
+
+  <div class="ctrl-group">
+    <div class="ctrl-title">Attention Neuron (DN)</div>
+    <div class="ctrl-row">
+      <label>DN Threshold</label>
+      <input type="range" id="dn_th_slider" min="10" max="300" step="1" value="100" disabled>
+      <span class="ctrl-val stat-dn" id="dn_th_val">—</span>
+    </div>
+  </div>
+
+  <div class="ctrl-group">
+    <div class="ctrl-title">STDP Learning</div>
+    <div class="ctrl-row">
+      <label>LTP amplitude</label>
+      <input type="range" id="ltp_slider" min="0.001" max="0.04" step="0.001" value="0.016">
+      <span class="ctrl-val" id="ltp_val">0.016</span>
+    </div>
+    <div class="ctrl-row">
+      <label>LTD amplitude</label>
+      <input type="range" id="ltd_slider" min="-0.02" max="-0.0005" step="0.0005" value="-0.00763">
+      <span class="ctrl-val" id="ltd_val">-0.008</span>
+    </div>
+  </div>
+
+  <div class="ctrl-group">
+    <div class="ctrl-title">Post-Spike Inhibition</div>
+    <div class="ctrl-row">
+      <label>Duration (ms)</label>
+      <input type="range" id="inh_dur_slider" min="0" max="15" step="0.5" value="5">
+      <span class="ctrl-val" id="inh_dur_val">5.0</span>
+    </div>
+    <div class="ctrl-row">
+      <label>Strength Thr.</label>
+      <input type="range" id="inh_str_slider" min="20" max="400" step="5" value="150">
+      <span class="ctrl-val" id="inh_str_val">150</span>
+    </div>
+  </div>
+
+  <div class="ctrl-group">
+    <div class="ctrl-title">Noise Gate (Kalman)</div>
+    <div class="ctrl-row">
+      <label>Inhibit below σ</label>
+      <input type="range" id="ng_sd_slider" min="0.5" max="5.0" step="0.1" value="2.0">
+      <span class="ctrl-val" id="ng_sd_val">2.0</span>
+    </div>
+  </div>
+
+  <div class="ctrl-group">
+    <div class="ctrl-title">Output Control</div>
+    <div class="ctrl-row">
+      <label>Strategy</label>
+      <select id="decoder_sel">
+        <option value="discrete" selected>discrete</option>
+        <option value="ttl">TTL pulse</option>
+        <option value="trigger">trigger (decay)</option>
+        <option value="rate">rate</option>
+        <option value="population">population</option>
+      </select>
+    </div>
+    <div class="ctrl-row" id="ttl_width_row">
+      <label>TTL width (ms)</label>
+      <input type="range" id="ttl_width_slider" min="0.1" max="10" step="0.1" value="1.0">
+      <span class="ctrl-val" id="ttl_width_val">1.0</span>
+    </div>
+    <div class="ctrl-row" id="ttl_high_row">
+      <label>TTL level</label>
+      <input type="range" id="ttl_high_slider" min="0.1" max="1.0" step="0.05" value="1.0">
+      <span class="ctrl-val" id="ttl_high_val">1.0</span>
+    </div>
+  </div>
+
+  <div class="ctrl-group">
+    <div class="ctrl-title">Display</div>
+    <div class="ctrl-row">
+      <label>Time window</label>
+      <input type="range" id="time_window_slider" min="10" max="1000" step="10" value="100">
+      <span class="ctrl-val" id="time_window_val">100 ms</span>
+    </div>
+  </div>
+
+</div>

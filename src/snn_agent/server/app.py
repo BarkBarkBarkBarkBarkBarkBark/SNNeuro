@@ -1,6 +1,6 @@
 # AGENT-HINT: Asyncio event loop — the runtime heart of the SNN agent.
 # PURPOSE: Three input modes (electrode/lsl/synthetic), WebSocket broadcast,
-#          HTTP static file serving, UDP control output.
+#          UDP control output.  Django on port 8000 is the browser UI.
 # PIPELINE LOOP: _process_stream() runs build_pipeline() → complete_pipeline()
 #   then loops: preprocess → encode → DN + noise_gate → inhibit → L1 → L2 → decode.
 # WEBSOCKET COMMANDS: JSON {"key": value} from browser → ws_handler() dispatches.
@@ -19,9 +19,8 @@ Supports three modes (set in Config):
 
 Services:
   1. UDP  electrode input
-  2. WS   spike stream to browser
-  3. HTTP serves static viz (index.html)
-  4. UDP  control signal output
+  2. WS   spike stream to browser  (Django dashboard on port 8000 proxies this)
+  3. UDP  control signal output
 """
 
 from __future__ import annotations
@@ -33,9 +32,7 @@ import signal
 import socket
 import struct
 import subprocess
-import threading
 import time
-import http.server
 from pathlib import Path
 
 import numpy as np
@@ -49,8 +46,9 @@ ws_clients: set = set()
 pipeline_refs: dict = {}
 
 # ── Runtime mode switching ────────────────────────────────────────────────────
-_stream_task: asyncio.Task | None = None
+_stream_tasks: list[asyncio.Task] = []
 _current_mode: str = "idle"
+_num_channels: int = 1
 _base_cfg: Config = DEFAULT_CONFIG
 
 # Electrode frame format: magic(uint16) + sample(float32)
@@ -76,23 +74,6 @@ def _free_port(port: int) -> None:
     except (subprocess.CalledProcessError, OSError, ValueError):
         pass
 
-
-# ── HTTP static server ───────────────────────────────────────────────────────
-class _StaticHandler(http.server.SimpleHTTPRequestHandler):
-    def __init__(self, *a, **kw):
-        super().__init__(*a, directory=str(STATIC_DIR), **kw)
-
-    def log_message(self, *_):
-        pass
-
-
-class _ReusableHTTPServer(http.server.HTTPServer):
-    allow_reuse_address = True
-    allow_reuse_port = True
-
-
-def _run_http(port: int) -> None:
-    _ReusableHTTPServer(("", port), _StaticHandler).serve_forever()
 
 
 # ── UDP receiver ──────────────────────────────────────────────────────────────
@@ -181,6 +162,7 @@ async def ws_handler(websocket) -> None:
                 if "get_status" in data:
                     await websocket.send(json.dumps({
                         "status": "ok", "mode": _current_mode,
+                        "num_channels": _num_channels,
                     }))
                 if "list_files" in data:
                     raw_dir = (
@@ -216,6 +198,7 @@ async def _process_stream(
     cfg: Config,
     sample_source,
     *,
+    channel_idx: int = 0,
     pace_realtime: bool = False,
     pace_fs: float | None = None,
 ):
@@ -255,14 +238,13 @@ async def _process_stream(
     t0 = time.perf_counter()
 
     async for frame_idx, raw_sample in sample_source:
+        # Yield on every iteration so parallel channel tasks get fair scheduling.
+        # Without this, channel 0 hogs the single-threaded event loop and
+        # starves channels 1..N.
+        await asyncio.sleep(0)
+
         processed = preproc.step(float(raw_sample))
         if not processed:
-            # Pace even for decimated samples
-            if pace_realtime and pace_fs and frame_idx % 500 == 0:
-                expected = frame_idx / pace_fs
-                elapsed = time.perf_counter() - t0
-                if expected > elapsed:
-                    await asyncio.sleep(expected - elapsed)
             continue
 
         for pp_sample in processed:
@@ -278,6 +260,7 @@ async def _process_stream(
                         "t": step_count, "samples": list(sample_buf),
                         "dn_flags": list(dn_buf), "spikes": [],
                         "control": 0, "confidence": 0,
+                        "channel": channel_idx,
                     }))
                     sample_buf.clear()
                     dn_buf.clear()
@@ -291,12 +274,13 @@ async def _process_stream(
             # First step after calibration — build downstream stages
             if pipeline_obj is None:
                 pipeline_obj = complete_pipeline(cfg, effective_cfg, preproc, encoder)
-                pipeline_refs["dn"] = pipeline_obj.attention
-                pipeline_refs["template"] = pipeline_obj.template
-                pipeline_refs["decoder"] = pipeline_obj.decoder
-                pipeline_refs["inhibitor"] = pipeline_obj.inhibitor
-                pipeline_refs["noise_gate"] = pipeline_obj.noise_gate
-                pipeline_refs["effective_fs"] = preproc.effective_fs
+                if channel_idx == 0:  # only expose primary channel for live tuning
+                    pipeline_refs["dn"] = pipeline_obj.attention
+                    pipeline_refs["template"] = pipeline_obj.template
+                    pipeline_refs["decoder"] = pipeline_obj.decoder
+                    pipeline_refs["inhibitor"] = pipeline_obj.inhibitor
+                    pipeline_refs["noise_gate"] = pipeline_obj.noise_gate
+                    pipeline_refs["effective_fs"] = preproc.effective_fs
                 print(
                     f"   ✅ Encoder calibrated: {encoder.n_centers} centres × "
                     f"{encoder.twindow} delays = {encoder.n_afferents} afferents"
@@ -385,6 +369,7 @@ async def _process_stream(
             if step_count % broadcast_every == 0 and sample_buf:
                 broadcast_msg = {
                     "t": step_count,
+                    "channel": channel_idx,
                     "samples": list(sample_buf),
                     "dn_flags": list(dn_buf),
                     "spikes": sorted(l1_spike_set),
@@ -407,10 +392,6 @@ async def _process_stream(
                 dn_buf.clear()
                 l1_spike_set.clear()
                 dec_spike_set.clear()
-
-        # Yield periodically
-        if step_count % 100 == 0:
-            await asyncio.sleep(0)
 
     elapsed_total = time.perf_counter() - t0
     print(
@@ -486,7 +467,7 @@ async def _synthetic_source(cfg: Config):
     recording, sorting = si.generate_ground_truth_recording(
         durations=[syn.duration_s],
         sampling_frequency=float(syn.fs),
-        num_channels=1,
+        num_channels=syn.num_channels,
         num_units=syn.num_units,
         seed=syn.seed,
     )
@@ -519,7 +500,8 @@ async def _synthetic_source(cfg: Config):
 
 
 # ── Array source (for file playback) ──────────────────────────────────────────
-async def _array_source(traces: np.ndarray, fs: float, name: str = "array"):
+async def _array_source(traces: np.ndarray, fs: float, name: str = "array",
+                        emit_done: bool = True):
     """Yield samples from a pre-loaded numpy array at real-time pace."""
     n = len(traces)
     print(f"   ▶  Streaming {name}: {n} samples at {fs:.0f} Hz ({n/fs:.1f}s)")
@@ -531,28 +513,29 @@ async def _array_source(traces: np.ndarray, fs: float, name: str = "array"):
             elapsed = time.perf_counter() - t0
             if expected > elapsed:
                 await asyncio.sleep(expected - elapsed)
-            else:
-                await asyncio.sleep(0)
     print(f"   ⏹  Playback complete: {name}")
-    await _broadcast(json.dumps(
-        {"mode_change": {"mode": "idle", "state": "finished"}}
-    ))
+    if emit_done:
+        await _broadcast(json.dumps(
+            {"mode_change": {"mode": "idle", "state": "finished"}}
+        ))
     while True:
         await asyncio.sleep(1)
 
 
 # ── Runtime mode launcher ─────────────────────────────────────────────────────
 async def _launch_mode(mode: str, **kwargs) -> dict:
-    """Cancel current stream and start a new source. Returns status dict."""
-    global _stream_task, _current_mode, pipeline_refs
+    """Cancel current streams and start a new source. Returns status dict."""
+    global _stream_tasks, _current_mode, _num_channels, pipeline_refs
 
-    # Cancel existing stream
-    if _stream_task is not None and not _stream_task.done():
-        _stream_task.cancel()
-        try:
-            await _stream_task
-        except (asyncio.CancelledError, Exception):
-            pass
+    # Cancel all existing stream tasks
+    for _task in _stream_tasks:
+        if not _task.done():
+            _task.cancel()
+            try:
+                await _task
+            except (asyncio.CancelledError, Exception):
+                pass
+    _stream_tasks.clear()
 
     pipeline_refs.clear()
     _current_mode = mode
@@ -565,7 +548,7 @@ async def _launch_mode(mode: str, **kwargs) -> dict:
     try:
         if mode == "synthetic":
             try:
-                import spikeinterface  # noqa: F401
+                import spikeinterface.full as si
             except ImportError:
                 _current_mode = "error"
                 return {
@@ -576,25 +559,46 @@ async def _launch_mode(mode: str, **kwargs) -> dict:
             from dataclasses import replace as _repl
 
             syn = cfg.synthetic
-            if kwargs:
-                syn = _repl(
-                    syn,
-                    duration_s=float(kwargs.get("duration_s", syn.duration_s)),
-                    num_units=int(kwargs.get("num_units", syn.num_units)),
-                    noise_level=float(
-                        kwargs.get("noise_level", syn.noise_level)
-                    ),
-                )
-            cfg = _repl(cfg, synthetic=syn, sampling_rate_hz=syn.fs)
-            source = _synthetic_source(cfg)
-            _stream_task = asyncio.create_task(
-                _process_stream(
-                    cfg,
-                    source,
-                    pace_realtime=syn.realtime,
-                    pace_fs=float(syn.fs),
-                )
+            num_channels = int(kwargs.get("num_channels", syn.num_channels))
+            syn = _repl(
+                syn,
+                duration_s=float(kwargs.get("duration_s", syn.duration_s)),
+                num_units=int(kwargs.get("num_units", syn.num_units)),
+                noise_level=float(kwargs.get("noise_level", syn.noise_level)),
+                num_channels=num_channels,
             )
+            cfg = _repl(cfg, synthetic=syn, sampling_rate_hz=syn.fs)
+            _num_channels = num_channels
+
+            if num_channels > 1:
+                # Generate all channels at once, run N parallel pipelines
+                recording, _ = si.generate_ground_truth_recording(
+                    durations=[syn.duration_s],
+                    sampling_frequency=float(syn.fs),
+                    num_channels=num_channels,
+                    num_units=syn.num_units,
+                    seed=syn.seed,
+                )
+                traces = recording.get_traces(segment_index=0)  # (n_samples, n_ch)
+                for ch_idx in range(num_channels):
+                    source = _array_source(
+                        traces[:, ch_idx], float(syn.fs), f"ch{ch_idx}",
+                        emit_done=(ch_idx == 0),
+                    )
+                    _stream_tasks.append(asyncio.create_task(
+                        _process_stream(
+                            cfg, source, channel_idx=ch_idx,
+                            pace_realtime=syn.realtime, pace_fs=float(syn.fs),
+                        )
+                    ))
+            else:
+                source = _synthetic_source(cfg)
+                _stream_tasks.append(asyncio.create_task(
+                    _process_stream(
+                        cfg, source, channel_idx=0,
+                        pace_realtime=syn.realtime, pace_fs=float(syn.fs),
+                    )
+                ))
             return {"status": "ok", "mode": "synthetic"}
 
         elif mode == "file":
@@ -641,11 +645,11 @@ async def _launch_mode(mode: str, **kwargs) -> dict:
                 }
             cfg = cfg.with_overrides(sampling_rate_hz=sfreq)
             source = _array_source(traces, float(sfreq), p.name)
-            _stream_task = asyncio.create_task(
+            _stream_tasks.append(asyncio.create_task(
                 _process_stream(
-                    cfg, source, pace_realtime=True, pace_fs=float(sfreq)
+                    cfg, source, channel_idx=0, pace_realtime=True, pace_fs=float(sfreq)
                 )
-            )
+            ))
             return {
                 "status": "ok",
                 "mode": "file",
@@ -655,14 +659,14 @@ async def _launch_mode(mode: str, **kwargs) -> dict:
             }
 
         elif mode == "lsl":
-            _stream_task = asyncio.create_task(sim_loop_lsl(cfg))
+            _stream_tasks.append(asyncio.create_task(sim_loop_lsl(cfg)))
             return {"status": "ok", "mode": "lsl"}
 
         elif mode == "electrode":
             queue = kwargs.get("queue", asyncio.Queue(maxsize=4096))
-            _stream_task = asyncio.create_task(
+            _stream_tasks.append(asyncio.create_task(
                 sim_loop_electrode(cfg, queue)
-            )
+            ))
             return {"status": "ok", "mode": "electrode"}
 
         else:
@@ -715,18 +719,14 @@ async def _async_main(cfg: Config) -> None:
     mode = cfg.mode
 
     _free_port(cfg.ws_port)
-    _free_port(cfg.http_port)
-
-    # HTTP static server (daemon thread)
-    threading.Thread(target=_run_http, args=(cfg.http_port,), daemon=True).start()
 
     n_l1 = cfg.l1.n_neurons
-    print(f"\n⚡ SNN Agent")
+    print(f"\n⚡ SNN Agent  (pipeline server)")
     print(f"   L1 neurons   →  {n_l1}")
     print(f"   Strategy     →  {cfg.decoder.strategy}")
-    print(f"   Browser      →  http://localhost:{cfg.http_port}")
     print(f"   WebSocket    →  ws://localhost:{cfg.ws_port}")
-    print(f"   Mode         →  {mode}\n")
+    print(f"   Mode         →  {mode}")
+    print(f"   Dashboard    →  run ./start.sh for the browser UI  (port 8000)\n")
 
     # Start initial stream based on configured mode
     if mode == "electrode":
@@ -801,24 +801,56 @@ def main() -> None:
         default=False,
         help="Ignore data/best_config.json and use built-in defaults",
     )
+    parser.add_argument(
+        "--config",
+        default=None,
+        metavar="PATH",
+        help="Path to a config JSON file (overrides --no-optimized)",
+    )
+    parser.add_argument(
+        "--channels",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Number of parallel synthetic channels (default: 1)",
+    )
     args = parser.parse_args()
 
-    # ── Build config: optimized params → CLI overrides ────────────────────
-    if not args.no_optimized:
+    # ── Build config: file / optimized params → CLI overrides ────────────────────
+    if args.config:
+        cfg_path = Path(args.config)
+        if cfg_path.exists():
+            try:
+                with open(cfg_path) as _f:
+                    _data = json.load(_f)
+                _params = {k: v for k, v in _data.get("parameters", {}).items()
+                           if k not in ("f_half", "accuracy", "precision", "recall")}
+                cfg = Config.from_flat(_params) if _params else DEFAULT_CONFIG
+                print(f"✓  Loaded config from {cfg_path}")
+            except Exception as exc:
+                print(f"⚠  Could not load {cfg_path}: {exc}")
+                cfg = DEFAULT_CONFIG
+        else:
+            print(f"⚠  Config file not found: {cfg_path}")
+            cfg = DEFAULT_CONFIG
+    elif not args.no_optimized:
         optimized = _load_optimized_config()
-    else:
-        optimized = None
-
-    if optimized is not None:
-        cfg = optimized
-        print(f"✓  Loaded optimized hyperparameters from {_BEST_CONFIG_PATH.name}")
+        if optimized is not None:
+            cfg = optimized
+            print(f"✓  Loaded optimized hyperparameters from {_BEST_CONFIG_PATH.name}")
+        else:
+            cfg = DEFAULT_CONFIG
+            print("ℹ  No optimized config found — using built-in defaults")
     else:
         cfg = DEFAULT_CONFIG
-        if not args.no_optimized:
-            print("ℹ  No optimized config found — using built-in defaults")
 
     if args.mode:
         cfg = cfg.with_overrides(mode=args.mode)
+
+    if args.channels is not None:
+        from dataclasses import replace as _repl
+        _syn = _repl(cfg.synthetic, num_channels=args.channels)
+        cfg = _repl(cfg, synthetic=_syn)
 
     try:
         asyncio.run(_async_main(cfg))

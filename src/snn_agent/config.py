@@ -91,6 +91,7 @@ class LSLConfig:
 class SyntheticConfig:
     duration_s: float = 20.0
     fs: int = 30_000
+    num_channels: int = 1
     num_units: int = 2
     noise_level: float = 8.0
     seed: int = 42
@@ -280,6 +281,7 @@ _FLAT_MAP: dict[str, tuple[str | None, str]] = {
     "lsl_bufsize_sec": ("lsl", "bufsize_sec"),
     "lsl_poll_interval_s": ("lsl", "poll_interval_s"),
     # synthetic
+    "synth_num_channels": ("synthetic", "num_channels"),
     "synth_duration_s": ("synthetic", "duration_s"),
     "synth_fs": ("synthetic", "fs"),
     "synth_num_units": ("synthetic", "num_units"),

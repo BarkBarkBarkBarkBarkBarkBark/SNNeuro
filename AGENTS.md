@@ -8,9 +8,20 @@
 ## Quick Start
 ```
 uv venv && source .venv/bin/activate
-uv pip install -e ".[eval,dev]"
-snn-serve                    # launch live server (http://localhost:8080)
-snn-serve --mode synthetic   # start with synthetic signal
+uv pip install -e ".[eval,dev,web]"
+
+# ── Browser dashboard (primary entry point) ───────────────────────────────────
+./start.sh                                        # synthetic mode, 1 channel
+./start.sh --channels 4 --mode synthetic --config data/a_best_config.json
+# or via Django management:
+python manage.py run_all --mode synthetic --channels 4
+# Browse from your machine: http://<server-ip>:8000/
+
+# ── Pipeline server only (no browser UI) ─────────────────────────────────────
+snn-serve                                         # WebSocket on ws://localhost:8765
+snn-serve --mode synthetic --channels 4 --config data/a_best_config.json
+
+# ── Evaluation / optimisation ─────────────────────────────────────────────────
 snn-evaluate                 # offline accuracy benchmark (single scenario)
 snn-optimize                 # Optuna TPE hyperparameter search (Stage 1)
 snn-genetic                  # genetic crossover optimizer (Stage 2)
@@ -92,6 +103,37 @@ raw electrode signal (80 kHz UDP / LSL / synthetic)
 | `docs/manifesto.json` | Machine-readable project contract | — | I/O protocols, file roles, extension points. |
 | `data/best_config.json` | Current best hyperparameters | — | Updated by optimizer runs. Contains params, score, and all metrics. |
 
+### Django Web UI (multi-page dashboard)
+
+| File | Purpose | Agent Notes |
+|------|---------|-------------|
+| `start.sh` | **Primary launch script** for SSH deployments | Starts `snn-serve` + `daphne`, prints `http://<LAN-IP>:8000/`. Use this from the command line. |
+| `manage.py` | Django management entry point | `python manage.py run_all` also starts both servers. |
+| `snn_web/settings.py` | Django settings | `PIPELINE_WS_URL = "ws://localhost:8765"`. No database; no sessions. `DEBUG=True` serves statics via `ASGIStaticFilesHandler`. |
+| `snn_web/asgi.py` | ASGI app — HTTP + WebSocket routing | Wraps HTTP with `ASGIStaticFilesHandler` in DEBUG; WS uses `AllowedHostsOriginValidator`. |
+| `snn_web/urls.py` | Root URL conf | Delegates all routes to `dashboard.urls`. |
+| `snn_web/management.py` | Entry point for `snn-web` CLI script | Calls `django.core.management.execute_from_command_line`. |
+| `dashboard/urls.py` | Dashboard URL patterns | `/` → input, `/monitor/` → monitor, `/api/launch/`, `/api/files/`, `/api/status/`. |
+| `dashboard/views.py` | Page views | Sessionless: config passed as URL query params (`?channels=N&source=synthetic`). |
+| `dashboard/forms.py` | `InputConfigForm` | `num_channels` (1–32), `source_type` radio, synthetic/file params, decoder strategy. |
+| `dashboard/api.py` | JSON API endpoints | Forwards commands to pipeline via short-lived WS connection. Uses `asyncio.new_event_loop()` in sync views. |
+| `dashboard/consumers.py` | `StreamConsumer` — WS proxy | Forwards browser ↔ pipeline WS at `PIPELINE_WS_URL`. Sends friendly error if pipeline not running. |
+| `dashboard/routing.py` | WS URL routing | Maps `ws/stream/` → `StreamConsumer`. |
+| `dashboard/static/dashboard/css/snn.css` | All dashboard styles | Extracted from `index.html` + nav, channel cards, input page styles. |
+| `dashboard/static/dashboard/js/websocket.js` | WS connection manager | `onMessage(type, fn)` dispatcher. Types: `stream`, `mode_change`, `files`, `status`, `open`, `*`. |
+| `dashboard/static/dashboard/js/waveform.js` | Ring-buffer waveform renderer | Fixes scroll-speed bug. `setTimeWindow(ms)`, `setChannel(ch)`. `EFFECTIVE_FS=20000` hardcoded. |
+| `dashboard/static/dashboard/js/raster.js` | L1 + DEC raster renderer | Ring-buffer spike events. Syncs time window with waveform. |
+| `dashboard/static/dashboard/js/network_viz.js` | Network topology diagram | Throttled ~15fps. Ported from `index.html`. |
+| `dashboard/static/dashboard/js/stats.js` | Stats bar 1Hz updater | Reads `msg.channel` to filter by active channel. |
+| `dashboard/static/dashboard/js/controls.js` | Parameter sliders + time window | `initDNThreshold(val)` from first broadcast. Time window is client-only (no WS command). |
+| `dashboard/static/dashboard/js/launcher.js` | Source launcher bar | Handles file/synthetic launch buttons, mode dot, file browse. |
+| `dashboard/static/dashboard/js/channels.js` | Channel card strip | Mini-waveforms per channel, click-to-select. Routes by `msg.channel ?? 0`. |
+| `dashboard/templates/dashboard/base.html` | Base layout | Nav with INPUT/MONITOR links, WS status indicator. |
+| `dashboard/templates/dashboard/input.html` | Input config page | Source type tabs, channel count, synthetic/file params, decoder strategy. |
+| `dashboard/templates/dashboard/monitor.html` | Live monitor page | ES module imports, `NUM_CHANNELS` from Django context. |
+| `dashboard/templates/dashboard/partials/` | Template partials | `_launcher`, `_waveform`, `_stats_bar`, `_network_viz`, `_controls`. |
+| `dashboard/management/commands/run_all.py` | `manage.py run_all` command | Starts both servers as subprocesses; handles Ctrl+C cleanup. |
+
 ## Key Conventions for Agents
 
 1. **Config is frozen** — never mutate. Use `cfg.with_overrides()` or `Config.from_flat()`.
@@ -101,7 +143,7 @@ raw electrode signal (80 kHz UDP / LSL / synthetic)
    - **Parameter tuning:** `dn_threshold`, `l1_stdp_ltp`, `l1_stdp_ltd`, `inh_duration_ms`, `inh_strength_threshold`, `ng_inhibit_below_sd`, `decoder_strategy`, `ttl_width_ms`, `ttl_high`
    - **Source launching:** `launch_synthetic` (dict with optional `duration_s`, `num_units`, `noise_level`), `launch_file` (string path to .ncs), `get_status`, `list_files`
    - **Responses:** Server replies with `{"status": "ok", "mode": ...}` or `{"status": "error", "message": ...}`, and broadcasts `{"mode_change": {"mode": ..., "state": ...}}` to all clients.
-5. **Broadcast format** — JSON dict with `t`, `samples`, `dn_flags`, `spikes`, `control`, `confidence`. Extended fields: `noise_gate`, `inhibition_active`, `l1_membrane`, `dec_spikes`, `dec_hex`.
+5. **Broadcast format** — JSON dict with `t`, `channel`, `samples`, `dn_flags`, `spikes`, `control`, `confidence`. Extended fields: `noise_gate`, `inhibition_active`, `l1_membrane`, `dec_spikes`, `dec_hex`. The `channel` field (0-indexed) is present in all messages; JS renderers filter by `msg.channel ?? 0`.
 6. **Extension checklist** — when adding a new component:
    - Add its `*Config` dataclass to `config.py`
    - Add flat-key entries to `_FLAT_MAP`
@@ -138,3 +180,4 @@ See `docs/optimization_manifest.yaml` for ranges and types.
 - **Core**: numpy, scipy, torch, snntorch, websockets, pyyaml
 - **Eval** (optional): spikeinterface, optuna
 - **LSL** (optional): mne, mne-lsl
+- **Web** (optional): django>=5.0, channels>=4.0, daphne>=4.0

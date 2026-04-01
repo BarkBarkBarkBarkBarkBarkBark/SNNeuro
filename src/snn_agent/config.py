@@ -130,7 +130,7 @@ class DECConfig:
     tm_samples: int = 10          # longer than L1 for temporal integration
     refractory_samples: int = 4
     any_fire_threshold: float = 0.5    # neuron 0 threshold (low → fires easily)
-    unit_threshold_factor: float = 0.4  # neurons 1–15 threshold = factor × n_l1
+    unit_threshold_factor: float = 0.15  # neurons 1–15 threshold = factor × n_l1  (0.15×110=16.5)
     wi_factor: float = 8.0        # lateral inhibition strength for WTA
     init_w_min: float = 0.3
     init_w_max: float = 0.8
@@ -142,13 +142,13 @@ class DECConfig:
     freeze_stdp: bool = False
     use_delays: bool = True       # toggle delay expansion
     n_delay_taps: int = 16        # delay buffer depth (taps)
-    dn_window_ms: float = 2.5    # keep DEC gate open N ms after each DN spike
+    dn_window_ms: float = 5.0    # keep DEC gate open N ms after each DN spike
 
 
 @dataclass(frozen=True, slots=True)
 class ConvergenceConfig:
     """Cross-channel convergence: per-probe (local) then global ensemble states."""
-    enabled: bool = True
+    enabled: bool = False  # disabled by default — wire in after DEC is tuned
     n_local_neurons: int = 16
     n_global_neurons: int = 32
     tm_samples: int = 15

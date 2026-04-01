@@ -189,40 +189,88 @@ async def ws_handler(websocket) -> None:
         async for msg in websocket:
             try:
                 data = json.loads(msg)
-                # DN threshold
+                # DN threshold (single-ch or multichannel)
                 if "dn_threshold" in data:
+                    v = float(data["dn_threshold"])
                     dn = pipeline_refs.get("dn")
                     if dn is not None:
-                        dn.threshold = float(data["dn_threshold"])
-                # L1 STDP params (live tuning)
+                        dn.threshold = v
+                    bank = pipeline_refs.get("bank")
+                    if bank is not None and bank.batched_attention is not None:
+                        bank.batched_attention.threshold = v
+                # L1 STDP params (single-ch or multichannel)
                 if "l1_stdp_ltp" in data:
+                    v = float(data["l1_stdp_ltp"])
                     tpl = pipeline_refs.get("template")
                     if tpl is not None:
-                        tpl.ltp = float(data["l1_stdp_ltp"])
+                        tpl.ltp = v
+                    bank = pipeline_refs.get("bank")
+                    if bank is not None and bank.template is not None:
+                        bank.template.ltp = v
                 if "l1_stdp_ltd" in data:
+                    v = float(data["l1_stdp_ltd"])
                     tpl = pipeline_refs.get("template")
                     if tpl is not None:
-                        tpl.ltd = float(data["l1_stdp_ltd"])
+                        tpl.ltd = v
+                    bank = pipeline_refs.get("bank")
+                    if bank is not None and bank.template is not None:
+                        bank.template.ltd = v
                 # Inhibition params
                 if "inh_duration_ms" in data:
                     inh = pipeline_refs.get("inhibitor")
                     if inh is not None:
                         fs = pipeline_refs.get("effective_fs", 20000)
                         inh.blanking_samples = max(1, int(float(data["inh_duration_ms"]) * 1e-3 * fs))
+                    bank = pipeline_refs.get("bank")
+                    if bank is not None and bank.inhibitors:
+                        fs = pipeline_refs.get("effective_fs", 20000)
+                        bs = max(1, int(float(data["inh_duration_ms"]) * 1e-3 * fs))
+                        for _inh in bank.inhibitors:
+                            if _inh is not None:
+                                _inh.blanking_samples = bs
                 if "inh_strength_threshold" in data:
+                    v = float(data["inh_strength_threshold"])
                     inh = pipeline_refs.get("inhibitor")
                     if inh is not None:
-                        inh.strength_threshold = float(data["inh_strength_threshold"])
-                # Noise gate params
+                        inh.strength_threshold = v
+                    bank = pipeline_refs.get("bank")
+                    if bank is not None and bank.inhibitors:
+                        for _inh in bank.inhibitors:
+                            if _inh is not None:
+                                _inh.strength_threshold = v
+                # Noise gate (single-ch or per-channel multichannel)
                 if "ng_inhibit_below_sd" in data:
+                    v = float(data["ng_inhibit_below_sd"])
                     ng = pipeline_refs.get("noise_gate")
                     if ng is not None:
-                        ng.inhibit_below_sd = float(data["ng_inhibit_below_sd"])
+                        ng.inhibit_below_sd = v
+                    bank = pipeline_refs.get("bank")
+                    if bank is not None and bank.noise_gates:
+                        for _ng in bank.noise_gates:
+                            if _ng is not None:
+                                _ng.inhibit_below_sd = v
+                # DEC unit threshold (multichannel: neurons 1-15)
+                if "dec_unit_threshold" in data:
+                    v = float(data["dec_unit_threshold"])
+                    bank = pipeline_refs.get("bank")
+                    if bank is not None and bank.dec_layer is not None:
+                        bank.dec_layer.unit_threshold = v
+                # DEC DN integration window (ms) — widens gate after each DN spike
+                if "dec_dn_window_ms" in data:
+                    v = float(data["dec_dn_window_ms"])
+                    bank = pipeline_refs.get("bank")
+                    if bank is not None and bank.dec_layer is not None:
+                        fs = pipeline_refs.get("effective_fs", 20000)
+                        bank.dec_layer._dn_window_samples = max(1, int(v * 1e-3 * fs))
                 # Decoder strategy switch
                 if "decoder_strategy" in data:
                     dec = pipeline_refs.get("decoder")
                     if dec is not None:
                         dec.strategy = str(data["decoder_strategy"])
+                    bank = pipeline_refs.get("bank")
+                    if bank is not None and bank.decoders:
+                        for _d in bank.decoders:
+                            _d.strategy = str(data["decoder_strategy"])
                 # TTL pulse width (ms)
                 if "ttl_width_ms" in data:
                     dec = pipeline_refs.get("decoder")
@@ -234,6 +282,44 @@ async def ws_handler(websocket) -> None:
                     dec = pipeline_refs.get("decoder")
                     if dec is not None:
                         dec._ttl_high = float(data["ttl_high"])
+                # ── Save / snapshot config ──────────────────────────────
+                if "get_config" in data:
+                    bank = pipeline_refs.get("bank")
+                    snap: dict = {}
+                    if bank is not None:
+                        if bank.batched_attention is not None:
+                            snap["dn_threshold"] = round(bank.batched_attention.threshold, 4)
+                        if bank.template is not None:
+                            snap["l1_stdp_ltp"] = round(bank.template.ltp, 6)
+                            snap["l1_stdp_ltd"] = round(bank.template.ltd, 6)
+                        if bank.dec_layer is not None:
+                            snap["dec_unit_threshold"] = round(bank.dec_layer.unit_threshold, 4)
+                            snap["dec_any_fire_threshold"] = round(bank.dec_layer.any_fire_threshold, 4)
+                            fs = pipeline_refs.get("effective_fs", 20000)
+                            snap["dec_dn_window_ms"] = round(bank.dec_layer._dn_window_samples / fs * 1000, 3)
+                        if bank.inhibitors:
+                            _inh0 = next((x for x in bank.inhibitors if x is not None), None)
+                            if _inh0:
+                                fs = pipeline_refs.get("effective_fs", 20000)
+                                snap["inh_duration_ms"] = round(_inh0.blanking_samples / fs * 1000, 2)
+                                snap["inh_strength_threshold"] = round(_inh0.strength_threshold, 2)
+                        if bank.noise_gates:
+                            _ng0 = next((x for x in bank.noise_gates if x is not None), None)
+                            if _ng0:
+                                snap["ng_inhibit_below_sd"] = round(_ng0.inhibit_below_sd, 3)
+                    else:
+                        # single-channel path
+                        dn = pipeline_refs.get("dn")
+                        if dn:
+                            snap["dn_threshold"] = round(dn.threshold, 4)
+                        tpl = pipeline_refs.get("template")
+                        if tpl:
+                            snap["l1_stdp_ltp"] = round(tpl.ltp, 6)
+                            snap["l1_stdp_ltd"] = round(tpl.ltd, 6)
+                        ng = pipeline_refs.get("noise_gate")
+                        if ng:
+                            snap["ng_inhibit_below_sd"] = round(ng.inhibit_below_sd, 3)
+                    await websocket.send(json.dumps({"config_snapshot": snap}))
                 # ── Channel selection (multi-channel) ────────────
                 if "select_channel" in data:
                     pipeline_refs["selected_ch"] = int(data["select_channel"])
@@ -637,6 +723,21 @@ async def _process_stream_multi(
     convergence_snapshot: list[float] = []
     probe_convergence_snapshot: list[list[float]] = []
 
+    # ── Live accuracy tracking (multichannel synthetic GT) ─────────────
+    _mc_has_gt = gt_spike_trains is not None
+    _mc_native_fs = pace_fs or float(cfg.sampling_rate_hz)
+    _mc_delta_samp = int(2.0 * 1e-3 * _mc_native_fs)
+    _mc_det_debounce = int(1.0 * 1e-3 * _mc_native_fs)
+    _mc_all_gt: np.ndarray = np.empty(0, dtype=np.int64)
+    if _mc_has_gt:
+        _mc_all_gt = np.sort(np.concatenate(list(gt_spike_trains.values())))
+    # Mutable state dict — mutated inside _process_one closure without nonlocal
+    _mc_st = {
+        'tp': 0, 'fp': 0, 'fn': 0,
+        'gt_ptr': 0, 'last_det': -99999, 'frame': 0,
+        'latencies': [], 'matched': set(),
+    }
+
     # Chunk accumulator for batched preprocessing
     raw_chunk = np.zeros((chunk_size, C), dtype=np.float64)
     chunk_idx = 0
@@ -706,6 +807,39 @@ async def _process_stream_multi(
                 if dec_cpu is not None:
                     dec_spike_sets[ch].update(np.flatnonzero(dec_cpu[ch]).tolist())
 
+            # ── Live accuracy: match any-channel L1 fire to merged GT ──
+            _mc_st['frame'] += 1
+            if _mc_has_gt:
+                _fi = _mc_st['frame']
+                # Expire old GT spikes as FN
+                while (_mc_st['gt_ptr'] < len(_mc_all_gt) and
+                       _mc_all_gt[_mc_st['gt_ptr']] < _fi - _mc_delta_samp):
+                    if _mc_st['gt_ptr'] not in _mc_st['matched']:
+                        _mc_st['fn'] += 1
+                    _mc_st['gt_ptr'] += 1
+                # Any channel fired L1?
+                any_ch_fired = bool(np.any(l1_cpu))
+                if any_ch_fired and _fi - _mc_st['last_det'] > _mc_det_debounce:
+                    _mc_st['last_det'] = _fi
+                    best_dist = float('inf')
+                    best_gi = -1
+                    for gi in range(_mc_st['gt_ptr'], len(_mc_all_gt)):
+                        gt_t = int(_mc_all_gt[gi])
+                        if gt_t > _fi + _mc_delta_samp:
+                            break
+                        if gi in _mc_st['matched']:
+                            continue
+                        dist = abs(_fi - gt_t)
+                        if dist <= _mc_delta_samp and dist < best_dist:
+                            best_dist = dist
+                            best_gi = gi
+                    if best_gi >= 0:
+                        _mc_st['tp'] += 1
+                        _mc_st['matched'].add(best_gi)
+                        _mc_st['latencies'].append(best_dist)
+                    else:
+                        _mc_st['fp'] += 1
+
             if "convergence_spikes" in result and result["convergence_spikes"] is not None:
                 convergence_snapshot = [
                     float(x) for x in result["convergence_spikes"].cpu().tolist()
@@ -740,6 +874,7 @@ async def _process_stream_multi(
                         "control": round(float(last_controls[ch]), 4),
                         "dec_hex": f"0x{int(hex_outputs[ch]):04X}",
                         "spk_hist": _spike_hist(l1_spike_sets[ch], _n_l1),
+                        "samples": sample_buf[ch][-30:],
                     })
                 ps = max(1, int(cfg.probe_size))
                 n_probes_mc = (C + ps - 1) // ps
@@ -763,12 +898,15 @@ async def _process_stream_multi(
                     "spikes": sorted(l1_spike_sets[sc]),
                     "control": round(float(last_controls[sc]), 4),
                     "confidence": round(float(last_confidences[sc]), 4),
-                    "dn_th": round(bank.attentions[sc].threshold, 2) if bank.attentions else 0,
+                    "dn_th": round(bank.batched_attention.threshold, 2) if bank.batched_attention is not None else 0,
                     "noise_gate": round(float(last_noise_gates[sc]), 4),
                     "inhibition_active": bool(last_inhibitions[sc]),
                     "channels": ch_summary,
                     "dn_open_selected": bool(dn_spikes[sc]),
                     "dec_gate_active": dec_active_sel,
+                    "dec_unit_threshold": round(bank.dec_layer.unit_threshold, 2) if bank.dec_layer is not None else 16.5,
+                    "dec_dn_window_ms": round(bank.dec_layer._dn_window_samples / bank.preprocessors[0].effective_fs * 1000, 2) if bank.dec_layer is not None else 5.0,
+                    "n_l1": cfg.l1.n_neurons,
                 }
                 if viz_detail and pipeline_refs.get("network_visible", True) and bank.template:
                     _mem_row = bank.template.mem[sc].detach().cpu()
@@ -791,6 +929,20 @@ async def _process_stream_multi(
                     broadcast_msg["probe_convergence"] = [
                         [round(v, 3) for v in row] for row in probe_convergence_snapshot
                     ]
+                if _mc_has_gt and (_mc_st['tp'] + _mc_st['fp'] + _mc_st['fn']) > 0:
+                    _p = _mc_st['tp'] / (_mc_st['tp'] + _mc_st['fp']) if (_mc_st['tp'] + _mc_st['fp']) > 0 else 0.0
+                    _r = _mc_st['tp'] / (_mc_st['tp'] + _mc_st['fn']) if (_mc_st['tp'] + _mc_st['fn']) > 0 else 0.0
+                    _fh = (1.25 * _p * _r) / (0.25 * _p + _r) if (_p + _r) > 0 else 0.0
+                    _lat = (np.mean(_mc_st['latencies']) / _mc_native_fs * 1000) if _mc_st['latencies'] else 0.0
+                    broadcast_msg["accuracy"] = {
+                        "precision": round(_p, 4),
+                        "recall":    round(_r, 4),
+                        "f_half":    round(_fh, 4),
+                        "tp": _mc_st['tp'], "fp": _mc_st['fp'], "fn": _mc_st['fn'],
+                        "latency_ms": round(_lat, 2),
+                        "n_gt": len(_mc_all_gt),
+                        "gt_progress": round(_mc_st['gt_ptr'] / len(_mc_all_gt), 4) if len(_mc_all_gt) > 0 else 0,
+                    }
                 await _broadcast(json.dumps(broadcast_msg))
                 for ch in range(C):
                     sample_buf[ch].clear()
@@ -814,10 +966,13 @@ async def _process_stream_multi(
                 for ch in range(C):
                     dn_buf[ch].append(0)
                 sc = pipeline_refs.get("selected_ch", 0)
+                _ps = max(1, int(cfg.probe_size))
                 if step_count % broadcast_stride == 0 and sample_buf[sc]:
                     await _broadcast(json.dumps({
                         "t": step_count,
                         "n_channels": C,
+                        "probe_size": _ps,
+                        "n_probes": (C + _ps - 1) // _ps,
                         "effective_fs": bank.preprocessors[0].effective_fs,
                         "samples": list(sample_buf[sc]),
                         "dn_flags": list(dn_buf[sc]),
@@ -1327,15 +1482,16 @@ async def _async_main(cfg: Config) -> None:
 _BEST_CONFIG_PATH = Path(__file__).resolve().parent.parent.parent.parent / "data" / "best_config.json"
 
 
-def _load_optimized_config() -> Config | None:
-    """Load best_config.json and return a Config built from its parameters.
+def _load_optimized_config(path: Path | None = None) -> "Config | None":
+    """Load best_config.json (or *path*) and return a Config built from its parameters.
 
     Returns ``None`` if the file doesn't exist or can't be parsed.
     """
-    if not _BEST_CONFIG_PATH.exists():
+    target = path if path is not None else _BEST_CONFIG_PATH
+    if not target.exists():
         return None
     try:
-        with open(_BEST_CONFIG_PATH) as f:
+        with open(target) as f:
             data = json.load(f)
         params = data.get("parameters", {})
         if not params:
@@ -1345,7 +1501,7 @@ def _load_optimized_config() -> Config | None:
                   if k not in ("f_half", "accuracy", "precision", "recall")}
         return Config.from_flat(params)
     except Exception as exc:  # noqa: BLE001
-        print(f"⚠  Could not load {_BEST_CONFIG_PATH}: {exc}")
+        print(f"⚠  Could not load {target}: {exc}")
         return None
 
 
@@ -1394,20 +1550,38 @@ def main() -> None:
         metavar="PORT",
         help="WebSocket port (default: config ws_port, usually 8765)",
     )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Path to a best_config JSON file (e.g. data/a_best_config.json); "
+             "overrides the default data/best_config.json auto-load",
+    )
     args = parser.parse_args()
 
     # ── Build config: optimized params → CLI overrides ────────────────────
-    if not args.no_optimized:
+    if args.config:
+        explicit_path = Path(args.config)
+        if not explicit_path.is_absolute():
+            explicit_path = Path.cwd() / explicit_path
+        optimized = _load_optimized_config(explicit_path)
+        if optimized is None:
+            print(f"⚠  Could not load --config {args.config} — using built-in defaults")
+        else:
+            print(f"✓  Loaded config from {args.config}")
+    elif not args.no_optimized:
         optimized = _load_optimized_config()
     else:
         optimized = None
 
     if optimized is not None:
         cfg = optimized
-        print(f"✓  Loaded optimized hyperparameters from {_BEST_CONFIG_PATH.name}")
+        if not args.config:
+            print(f"✓  Loaded optimized hyperparameters from {_BEST_CONFIG_PATH.name}")
     else:
         cfg = DEFAULT_CONFIG
-        if not args.no_optimized:
+        if not args.no_optimized and not args.config:
             print("ℹ  No optimized config found — using built-in defaults")
 
     if args.mode:

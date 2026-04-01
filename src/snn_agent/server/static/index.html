@@ -588,6 +588,20 @@ canvas {
   </div>
 
   <div class="ctrl-group">
+    <div class="ctrl-title">DEC Layer</div>
+    <div class="ctrl-row">
+      <label>Unit threshold</label>
+      <input type="range" id="dec_thr_slider" min="0.5" max="80" step="0.5" value="16.5">
+      <span class="ctrl-val" id="dec_thr_val">16.5</span>
+    </div>
+    <div class="ctrl-row">
+      <label>DN window (ms)</label>
+      <input type="range" id="dec_win_slider" min="0.5" max="15" step="0.1" value="5.0">
+      <span class="ctrl-val" id="dec_win_val">5.0</span>
+    </div>
+  </div>
+
+  <div class="ctrl-group">
     <div class="ctrl-title">Output Control</div>
     <div class="ctrl-row">
       <label>Strategy</label>
@@ -619,7 +633,15 @@ canvas {
       <span class="ctrl-val" id="zoom_val">×1 (45 ms)</span>
     </div>
   </div>
-</div>
+
+  <div class="ctrl-group">
+    <div class="ctrl-title">Config</div>
+    <div class="ctrl-row">
+      <button id="save_cfg_btn" style="width:100%;padding:4px 8px;background:#1a2a1a;border:1px solid #3a5a3a;color:#8f8;cursor:pointer;font-size:11px;">&#x1F4BE; Save Config JSON</button>
+    </div>
+  </div>
+
+</div><!-- /controls -->
 
 <div id="status">● connecting…</div>
 
@@ -629,6 +651,7 @@ const WS_PORT    = 8765;
 /** Same host as the page (fixes remote browser: ws://localhost was wrong). */
 const WS_HOST    = window.location.hostname || 'localhost';
 const N_L1       = 110;
+let   dynNL1     = N_L1;  // updated from server when n_l1 is broadcast
 const N_DEC      = 16;
 const CVW        = 900;
 const WAVE_H     = 120;
@@ -785,18 +808,14 @@ function updateSelectedChLabel() {
   if (sellab) sellab.textContent = 'selected: ch' + selectedCh;
 }
 
-function selectChannel(ch) {
-  if (ch === selectedCh) return;
-  chWaveHistory[selectedCh] = { waveMax, prevY };
-  if (chCards[selectedCh]) chCards[selectedCh].el.classList.remove('selected');
-  const ov = document.getElementById('ch_overview_light');
-  if (ov) ov.checked = false;
+/** Apply channel selection visually (no WS send). Safe to call from onmessage. */
+function _applyChannelSelection(ch) {
+  if (chCards[selectedCh]) {
+    chWaveHistory[selectedCh] = { waveMax, prevY };
+    chCards[selectedCh].el.classList.remove('selected');
+  }
   selectedCh = ch;
   if (chCards[ch]) chCards[ch].el.classList.add('selected');
-  wantServerVizDetail = effectiveClientWantsVizDetail();
-  if (ws && ws.readyState === 1) {
-    ws.send(JSON.stringify({ select_channel: ch, viz_detail: wantServerVizDetail }));
-  }
   updateSelectedChLabel();
   if (chCards[ch] && chCards[ch].el) {
     chCards[ch].el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
@@ -810,6 +829,17 @@ function selectChannel(ch) {
   const saved = chWaveHistory[ch] || { waveMax: 1e-6, prevY: WAVE_H / 2 };
   waveMax = saved.waveMax;
   prevY = saved.prevY;
+}
+
+function selectChannel(ch) {
+  if (ch === selectedCh) return;
+  const ov = document.getElementById('ch_overview_light');
+  if (ov) ov.checked = false;
+  _applyChannelSelection(ch);
+  wantServerVizDetail = effectiveClientWantsVizDetail();
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ select_channel: ch, viz_detail: wantServerVizDetail }));
+  }
 }
 
 // ── Pending data from WebSocket ───────────────────────────────────────────────
@@ -994,14 +1024,14 @@ function drawColumnTopologyCore(ctx) {
 
   ctx.fillStyle = '#444';
   ctx.fillText('L1', colX[2], margin - 5);
-  const nVis = Math.min(N_L1, 40);
+  const nVis = Math.min(dynNL1, 40);
   const l1Spacing = 300 / nVis;
   for (let i = 0; i < nVis; i++) {
-    const neuronIdx = Math.floor(i * N_L1 / nVis);
+    const neuronIdx = Math.floor(i * dynNL1 / nVis);
     const y = 40 + i * l1Spacing;
     const r = 3;
     const mem = netMembrane[neuronIdx] || 0;
-    const intensity = Math.min(1, Math.max(0, mem / 500));
+    const intensity = Math.min(1, Math.max(0, mem / 80));
     const fired = netL1Spikes.has(neuronIdx);
     ctx.beginPath();
     ctx.arc(colX[2], y, r, 0, Math.PI * 2);
@@ -1026,7 +1056,7 @@ function drawColumnTopologyCore(ctx) {
     const fired = netDECSpikes.has(i);
     const r = i === 0 ? 6 : 4;
     const col = DEC_COLORS[i];
-    const dimCol = i === 0 ? '#1a1a1a' : `hsl(${((i - 1) / (N_DEC - 1)) * 300}, 30%, 12%)`;
+    const dimCol = i === 0 ? '#2a2a2a' : `hsl(${((i - 1) / (N_DEC - 1)) * 300}, 50%, 20%)`;
     ctx.beginPath();
     ctx.arc(colX[3], y, r, 0, Math.PI * 2);
     ctx.fillStyle = fired ? col : dimCol;
@@ -1129,23 +1159,60 @@ if (netToggle) {
   });
 }
 
-// ── Per-channel mini spike-histogram renderer ────────────────────────
-function drawChCardHist(card, hist) {
+// ── Per-channel mini card renderer ───────────────────────────────────────────
+// If the channel summary includes raw `samples`, draw a waveform preview line
+// (white) and overlay spike-bin dots.  Falls back to pure histogram if absent.
+function drawChCardHist(card, hist, samples) {
   const ctx = card.ctx;
   const W = CARD_W;
   const H = CARD_H;
   ctx.fillStyle = '#020202';
   ctx.fillRect(0, 0, W, H);
-  const n = hist.length;
-  if (!n) return;
-  const bw = W / n;
-  let maxV = 1;
-  for (let i = 0; i < n; i++) if (hist[i] > maxV) maxV = hist[i];
-  for (let i = 0; i < n; i++) {
-    const h = (hist[i] / maxV) * (H - 2);
-    if (h < 0.5) continue;
-    ctx.fillStyle = '#00ff41';
-    ctx.fillRect(Math.floor(i * bw), H - h - 1, Math.max(1, Math.ceil(bw) - 1), h);
+
+  if (samples && samples.length > 1) {
+    // ── waveform path ────────────────────────────────────────────────────────
+    const n = samples.length;
+    let mn = samples[0], mx = samples[0];
+    for (let i = 1; i < n; i++) {
+      if (samples[i] < mn) mn = samples[i];
+      if (samples[i] > mx) mx = samples[i];
+    }
+    const span = mx - mn || 1;
+    ctx.beginPath();
+    ctx.strokeStyle = '#cccccc';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < n; i++) {
+      const x = (i / (n - 1)) * W;
+      const y = H - 2 - ((samples[i] - mn) / span) * (H - 4);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+
+    // ── spike activity overlay (faint green dots at top of fired bins) ───────
+    if (hist && hist.length > 0) {
+      const nb = hist.length;
+      let hmax = 1;
+      for (let i = 0; i < nb; i++) if (hist[i] > hmax) hmax = hist[i];
+      const bw = W / nb;
+      for (let i = 0; i < nb; i++) {
+        if (hist[i] === 0) continue;
+        const alpha = Math.min(1, hist[i] / hmax);
+        ctx.fillStyle = `rgba(0,255,65,${(0.35 + 0.65 * alpha).toFixed(2)})`;
+        ctx.fillRect(Math.floor(i * bw), 0, Math.max(1, Math.ceil(bw) - 1), 3);
+      }
+    }
+  } else if (hist && hist.length > 0) {
+    // ── pure spike histogram fallback ────────────────────────────────────────
+    const n = hist.length;
+    const bw = W / n;
+    let maxV = 1;
+    for (let i = 0; i < n; i++) if (hist[i] > maxV) maxV = hist[i];
+    for (let i = 0; i < n; i++) {
+      const h = (hist[i] / maxV) * (H - 2);
+      if (h < 0.5) continue;
+      ctx.fillStyle = '#00ff41';
+      ctx.fillRect(Math.floor(i * bw), H - h - 1, Math.max(1, Math.ceil(bw) - 1), h);
+    }
   }
 }
 
@@ -1193,7 +1260,7 @@ function render() {
       card.dnDot.className = 'ch-dn' + (ch.dn ? ' firing' : '');
       card.spkEl.textContent = ch.n_spikes;
       card.hexEl.textContent = ch.dec_hex ? ch.dec_hex.slice(2) : '0000';
-      if (ch.spk_hist) drawChCardHist(card, ch.spk_hist);
+      if (ch.spk_hist || ch.samples) drawChCardHist(card, ch.spk_hist, ch.samples);
     }
     pendingChannels = null;
   }
@@ -1508,6 +1575,47 @@ ttlHSlider.addEventListener('input', () => {
   sendCmd('ttl_high', v);
 });
 
+// DEC unit threshold slider
+const decThrSlider = document.getElementById('dec_thr_slider');
+const decThrVal = document.getElementById('dec_thr_val');
+decThrSlider.addEventListener('input', () => {
+  const v = parseFloat(decThrSlider.value);
+  decThrVal.textContent = v.toFixed(1);
+  sendCmd('dec_unit_threshold', v);
+});
+
+// DEC DN window slider
+const decWinSlider = document.getElementById('dec_win_slider');
+const decWinVal = document.getElementById('dec_win_val');
+decWinSlider.addEventListener('input', () => {
+  const v = parseFloat(decWinSlider.value);
+  decWinVal.textContent = v.toFixed(1);
+  sendCmd('dec_dn_window_ms', v);
+});
+
+// Save Config button
+const saveCfgBtn = document.getElementById('save_cfg_btn');
+if (saveCfgBtn) {
+  saveCfgBtn.addEventListener('click', () => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      saveCfgBtn.textContent = '\u23f3 fetching\u2026';
+      ws.send(JSON.stringify({ get_config: true }));
+    }
+  });
+}
+
+function _handleConfigSnapshot(snap) {
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const blob = new Blob([JSON.stringify(snap, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'snn_config_' + ts + '.json';
+  a.click();
+  URL.revokeObjectURL(url);
+  if (saveCfgBtn) saveCfgBtn.textContent = '\uD83D\uDCBE Save Config JSON';
+}
+
 // Time scale (zoom) slider
 const zoomSlider = document.getElementById('zoom_slider');
 const zoomVal = document.getElementById('zoom_val');
@@ -1644,6 +1752,7 @@ function connect() {
     if (msg.n_channels !== undefined && msg.n_channels > 1 && chCards.length === 0) {
       buildChannelGrid(msg.n_channels, msg.probe_size);
     }
+    if (msg.n_l1 !== undefined) dynNL1 = msg.n_l1;
     if (msg.probe_size !== undefined) probeSize = msg.probe_size;
     if (msg.n_probes !== undefined) nProbes = msg.n_probes;
     if (msg.n_local_neurons !== undefined) convNLocal = msg.n_local_neurons;
@@ -1652,9 +1761,8 @@ function connect() {
     if (msg.probe_convergence) pendingProbeConvergence = msg.probe_convergence;
     if (msg.global_convergence) pendingGlobalConvergence = msg.global_convergence;
     if (msg.convergence) pendingConvergence = msg.convergence;
-    if (msg.selected_ch !== undefined) {
-      selectedCh = msg.selected_ch;
-      updateSelectedChLabel();
+    if (msg.selected_ch !== undefined && msg.selected_ch !== selectedCh) {
+      _applyChannelSelection(msg.selected_ch);
     }
     if (msg.viz_detail !== undefined) wantServerVizDetail = msg.viz_detail;
 
@@ -1690,11 +1798,23 @@ function connect() {
     const lastSample = pendingSamples[pendingSamples.length - 1] || 0;
     updateStats(msg.t, pendingSpikes, dnSum, msg.control ?? 0, msg.confidence ?? 0, lastSample);
 
-    if (msg.dn_th !== undefined && !thInit) {
+    if (msg.config_snapshot !== undefined) {
+      _handleConfigSnapshot(msg.config_snapshot);
+    }
+
+    if (msg.dn_th !== undefined && !thInit && msg.dn_th > 0) {
       thSlider.value = msg.dn_th;
       thSlider.disabled = false;
       thVal.textContent = msg.dn_th.toFixed(0);
       thInit = true;
+      if (msg.dec_unit_threshold !== undefined) {
+        decThrSlider.value = msg.dec_unit_threshold;
+        decThrVal.textContent = parseFloat(msg.dec_unit_threshold).toFixed(1);
+      }
+      if (msg.dec_dn_window_ms !== undefined) {
+        decWinSlider.value = msg.dec_dn_window_ms;
+        decWinVal.textContent = parseFloat(msg.dec_dn_window_ms).toFixed(1);
+      }
     }
   };
 }

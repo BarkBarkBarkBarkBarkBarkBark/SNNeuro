@@ -163,3 +163,55 @@ parameters:
     low:  0.5
     high: 5.0
     description: "Post-DN integration window for DEC layer (ms) — how long DEC stays active after DN fires"
+
+  # ── DEC STDP parameters — Stage 2 (lock upstream params from best_config.json) ──
+  dec_stdp_ltp:
+    type: log
+    low:  0.001
+    high: 0.04
+    description: "DEC LTP amplitude — larger drives faster unit specialisation"
+    stage: 2
+
+  dec_stdp_ltd:
+    type: float
+    low:  -0.02
+    high: -0.001
+    description: "DEC LTD amplitude (negative) — global depression preventing over-generalisation"
+    stage: 2
+
+  dec_stdp_ltp_window:
+    type: int
+    low:  2
+    high: 12
+    description: "DEC causal STDP window in samples — spike co-incidence tolerance"
+    stage: 2
+
+  dec_unit_threshold_factor:
+    type: float
+    low:  0.1
+    high: 0.8
+    description: "DEC neurons 1-15 threshold = factor × n_l1 (lower = more permissive, fires more)"
+    stage: 2
+
+  dec_tm_samples:
+    type: int
+    low:  4
+    high: 20
+    description: "DEC LIF membrane time constant (samples) — temporal integration window"
+    stage: 2
+
+# ── Stage 2: DEC-only optimisation ────────────────────────────────────────
+# Run after Stage 1 converges.  Loads best_config.json and freezes all
+# upstream parameters, tuning only the 5 DEC STDP params above.
+# Invoke with:  snn-optimize --stage 2  (planned, not yet implemented)
+dec_stage2:
+  freeze_upstream: true      # lock all non-stage-2 params to data/best_config.json
+  stage2_params:             # only these keys are free to vary
+    - dec_stdp_ltp
+    - dec_stdp_ltd
+    - dec_stdp_ltp_window
+    - dec_unit_threshold_factor
+    - dec_tm_samples
+    - dec_dn_window_ms
+  n_trials: 60
+  objective_weight: "f_half"  # same objective, but now scored at DEC output (hex bits 1-15)

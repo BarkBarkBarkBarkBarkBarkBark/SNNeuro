@@ -48,8 +48,14 @@ class SpikeEncoder:
         self.n_centers: int = 0
         self.n_afferents: int = 0
 
-        # Shift register
-        self._shift_reg: np.ndarray | None = None
+        # Circular shift register (replaces np.roll for O(1) writes)
+        self._ring: np.ndarray | None = None   # flat bool ring buffer
+        self._ring_len: int = 0                  # n_centers * step_size * twindow
+        self._ring_head: int = 0                 # write pointer
+        # Pre-built read indices for subsample extraction (avoids reshape/slice per step)
+        self._read_indices: np.ndarray | None = None
+        # Pre-allocated output buffer (avoids ravel allocation per step)
+        self._out_buf: np.ndarray | None = None
 
         # Running noise / signal stats
         self._abs_buf: list[float] = []
@@ -79,21 +85,26 @@ class SpikeEncoder:
             else:
                 return np.zeros(0, dtype=bool)
 
-        assert self.centers is not None and self._shift_reg is not None
+        # ── Circular buffer write (O(1) — no array copy) ─────────────
+        ring = self._ring
+        nc = self.n_centers
+        head = self._ring_head
 
-        # Activate amplitude bins
+        # Activate amplitude bins: vectorised |centres − sample| ≤ dvm
         active = np.abs(self.centers - sample) <= self.dvm
 
-        # Shift register: shift left, insert new at right
-        self._shift_reg = np.roll(self._shift_reg, -self.n_centers)
-        self._shift_reg[-self.n_centers:] = active
+        # Write activated bins at head position in the ring
+        ring[head:head + nc] = active
+        # Advance head (mod ring length)
+        self._ring_head = (head + nc) % self._ring_len
 
-        # Subsample delay taps
-        out = self._shift_reg.reshape(
-            self.step_size * self.twindow, self.n_centers
-        ).T
-        current = out[:, :: self.step_size]  # [n_centers × twindow]
-        return current.ravel()
+        # ── Read subsampled delay taps via pre-built index array ──────
+        # _read_indices is shape [n_afferents] and contains the ring
+        # positions to read (offset by current head), built once at
+        # calibration time.  We add the current head and wrap.
+        idx = (self._read_indices + self._ring_head) % self._ring_len
+        np.take(ring, idx, out=self._out_buf)
+        return self._out_buf
 
     @property
     def is_calibrated(self) -> bool:
@@ -115,8 +126,34 @@ class SpikeEncoder:
         self.n_centers = len(self.centers)
         self.n_afferents = self.n_centers * self.twindow
 
-        reg_len = self.n_centers * self.step_size * self.twindow
-        self._shift_reg = np.zeros(reg_len, dtype=bool)
+        # ── Circular ring buffer (replaces old shift register) ────────
+        self._ring_len = self.n_centers * self.step_size * self.twindow
+        self._ring = np.zeros(self._ring_len, dtype=bool)
+        self._ring_head = 0
+
+        # ── Pre-build read indices for subsampled delay taps ──────────
+        # The original code did:
+        #   reshaped = ring.reshape(step_size*twindow, n_centres).T
+        #   out = reshaped[:, ::step_size]  # shape [n_centres, twindow]
+        #   return out.ravel()
+        #
+        # We pre-compute the flat indices so each step is just a gather.
+        # Row c, col t in the [n_centres × twindow] output corresponds to
+        # flat ring position:  (t * step_size) * n_centres + c
+        # Indices are relative to the *oldest* entry in the ring, which
+        # at read time sits at ring_head (because we just advanced head
+        # past the newest write).
+        nc = self.n_centers
+        ss = self.step_size
+        tw = self.twindow
+        indices = np.empty(self.n_afferents, dtype=np.intp)
+        k = 0
+        for c in range(nc):
+            for t in range(tw):
+                indices[k] = (t * ss) * nc + c
+                k += 1
+        self._read_indices = indices
+        self._out_buf = np.empty(self.n_afferents, dtype=bool)
 
         self._abs_buf.clear()
         self._calibrated = True

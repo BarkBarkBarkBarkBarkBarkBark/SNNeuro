@@ -40,12 +40,13 @@ export function init(sendRaw, getNumChannels = () => 1) {
     btnSynthetic.addEventListener('click', () => {
       setMode('synthetic', 'starting');
       _msg('Generating synthetic recording…');
+      const nCh = parseInt(document.getElementById('synth_channels')?.value || 1, 10);
       sendRaw({
         launch_synthetic: {
           duration_s:   parseFloat(document.getElementById('synth_dur')?.value  || 20),
           num_units:    parseInt(document.getElementById('synth_units')?.value  || 2),
           noise_level:  parseFloat(document.getElementById('synth_noise')?.value || 8),
-          num_channels: _getNumChannels(),
+          num_channels: nCh,
         },
       });
     });

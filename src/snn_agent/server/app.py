@@ -38,12 +38,47 @@ from pathlib import Path
 import numpy as np
 import websockets
 
+# Fast JSON serialisation (orjson is ~5× faster than stdlib json)
+try:
+    import orjson
+    def _json_dumps(obj: dict) -> str:
+        return orjson.dumps(obj).decode("utf-8")
+except ImportError:
+    def _json_dumps(obj: dict) -> str:  # type: ignore[misc]
+        return json.dumps(obj)
+
 from snn_agent.config import Config, DEFAULT_CONFIG
 from snn_agent.core.pipeline import build_pipeline, complete_pipeline
 
 # ── Shared state ──────────────────────────────────────────────────────────────
 ws_clients: set = set()
 pipeline_refs: dict = {}
+
+# ── Async broadcast queue (decouples serialisation from pipeline hot path) ────
+_broadcast_queue: asyncio.Queue | None = None
+_broadcast_task: asyncio.Task | None = None
+
+
+async def _broadcast_sender() -> None:
+    """Dedicated coroutine that drains the broadcast queue and sends to clients.
+
+    Runs in the background so the pipeline loop never blocks on WebSocket I/O.
+    """
+    while True:
+        msg = await _broadcast_queue.get()  # type: ignore[union-attr]
+        if ws_clients:
+            await asyncio.gather(
+                *(c.send(msg) for c in ws_clients),
+                return_exceptions=True,
+            )
+
+
+def _ensure_broadcast_queue() -> None:
+    """Create the queue and sender task if they don't exist yet."""
+    global _broadcast_queue, _broadcast_task
+    if _broadcast_queue is None:
+        _broadcast_queue = asyncio.Queue(maxsize=256)
+        _broadcast_task = asyncio.create_task(_broadcast_sender())
 
 # ── Runtime mode switching ────────────────────────────────────────────────────
 _stream_tasks: list[asyncio.Task] = []
@@ -153,14 +188,14 @@ async def ws_handler(websocket) -> None:
                     if not isinstance(params, dict):
                         params = {}
                     result = await _launch_mode("synthetic", **params)
-                    await websocket.send(json.dumps(result))
+                    await websocket.send(_json_dumps(result))
                 if "launch_file" in data:
                     result = await _launch_mode(
                         "file", file_path=str(data["launch_file"])
                     )
-                    await websocket.send(json.dumps(result))
+                    await websocket.send(_json_dumps(result))
                 if "get_status" in data:
-                    await websocket.send(json.dumps({
+                    await websocket.send(_json_dumps({
                         "status": "ok", "mode": _current_mode,
                         "num_channels": _num_channels,
                     }))
@@ -174,7 +209,7 @@ async def ws_handler(websocket) -> None:
                         files = sorted(
                             str(f) for f in raw_dir.glob("*.ncs")
                         )
-                    await websocket.send(json.dumps({
+                    await websocket.send(_json_dumps({
                         "files": files, "directory": str(raw_dir),
                     }))
             except (json.JSONDecodeError, ValueError, KeyError):
@@ -186,11 +221,24 @@ async def ws_handler(websocket) -> None:
 
 
 async def _broadcast(msg: str) -> None:
-    if ws_clients:
-        await asyncio.gather(
-            *(c.send(msg) for c in ws_clients),
-            return_exceptions=True,
-        )
+    """Enqueue a message for broadcast to all connected WebSocket clients.
+
+    If the queue is full (clients slower than pipeline), the oldest
+    message is silently dropped to prevent back-pressure stalling the
+    pipeline hot loop.
+    """
+    _ensure_broadcast_queue()
+    q = _broadcast_queue
+    assert q is not None
+    if q.full():
+        try:
+            q.get_nowait()  # drop oldest
+        except asyncio.QueueEmpty:
+            pass
+    try:
+        q.put_nowait(msg)
+    except asyncio.QueueFull:
+        pass
 
 
 # ── Common pipeline step (used by all three modes) ───────────────────────────
@@ -256,7 +304,7 @@ async def _process_stream(
             if not encoder.is_calibrated:
                 dn_buf.append(0)
                 if step_count % broadcast_every == 0 and sample_buf:
-                    await _broadcast(json.dumps({
+                    await _broadcast(_json_dumps({
                         "t": step_count, "samples": list(sample_buf),
                         "dn_flags": list(dn_buf), "spikes": [],
                         "control": 0, "confidence": 0,
@@ -338,9 +386,6 @@ async def _process_stream(
             for idx in np.flatnonzero(l1_spikes):
                 l1_spike_set.add(int(idx))
 
-            # Capture membrane state for visualization
-            l1_membrane_snapshot = pipeline_obj.template.mem.tolist()
-
             # Optional DEC spiking decoder layer (16 neurons)
             decoder_input = l1_spikes
             if pipeline_obj.dec_layer is not None:
@@ -367,6 +412,8 @@ async def _process_stream(
                 )
 
             if step_count % broadcast_every == 0 and sample_buf:
+                # Capture membrane state only at broadcast time (not every step)
+                l1_membrane_snapshot = pipeline_obj.template.mem.detach().numpy()
                 broadcast_msg = {
                     "t": step_count,
                     "channel": channel_idx,
@@ -382,12 +429,12 @@ async def _process_stream(
                     ),
                     "noise_gate": round(last_noise_gate, 4),
                     "inhibition_active": last_inhibition,
-                    "l1_membrane": [round(v, 2) for v in l1_membrane_snapshot],
+                    "l1_membrane": np.round(l1_membrane_snapshot, 2).tolist(),
                 }
                 if pipeline_obj and pipeline_obj.dec_layer is not None:
                     broadcast_msg["dec_spikes"] = sorted(dec_spike_set)
                     broadcast_msg["dec_hex"] = f"0x{pipeline_obj.dec_layer.hex_output:04X}"
-                await _broadcast(json.dumps(broadcast_msg))
+                await _broadcast(_json_dumps(broadcast_msg))
                 sample_buf.clear()
                 dn_buf.clear()
                 l1_spike_set.clear()
@@ -515,7 +562,7 @@ async def _array_source(traces: np.ndarray, fs: float, name: str = "array",
                 await asyncio.sleep(expected - elapsed)
     print(f"   ⏹  Playback complete: {name}")
     if emit_done:
-        await _broadcast(json.dumps(
+        await _broadcast(_json_dumps(
             {"mode_change": {"mode": "idle", "state": "finished"}}
         ))
     while True:
@@ -539,7 +586,7 @@ async def _launch_mode(mode: str, **kwargs) -> dict:
 
     pipeline_refs.clear()
     _current_mode = mode
-    await _broadcast(json.dumps(
+    await _broadcast(_json_dumps(
         {"mode_change": {"mode": mode, "state": "starting"}}
     ))
 

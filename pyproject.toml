@@ -21,6 +21,8 @@ dependencies = [
     "snntorch>=0.7",
     "websockets>=10",
     "pyyaml>=6.0",
+    "numba>=0.58",
+    "orjson>=3.9",
 ]
 
 [project.optional-dependencies]

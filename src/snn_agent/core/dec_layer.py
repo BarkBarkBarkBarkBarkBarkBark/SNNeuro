@@ -4,6 +4,7 @@
 # INPUTS:  l1_spikes [n_l1], dn_spike (bool).  All integration is DN-gated.
 # OUTPUT:  dec_spikes [16] boolean + hex word (uint16).
 # DELAYS:  Optional delay expansion (toggle via DECConfig.use_delays).
+# PERF:    CPU tensors for single-sample throughput; vectorized STDP.
 # CONFIG:  DECConfig in config.py.
 # SEE ALSO: template.py (L1 upstream), decoder.py (control signal downstream),
 #           config.py (DECConfig), pipeline.py (wiring).
@@ -27,10 +28,14 @@ one spike per putative neural unit:
   Only integrates during DN-active timesteps (noise-driven L1 spikes are
   ignored).
 
+**Vectorized STDP:** STDP is fully vectorized (no Python for-loop over
+winners).  All tensors stay on CPU for best single-sample throughput
+(CUDA sync overhead exceeds compute time for per-sample processing on
+Jetson Orin).
+
 Delay expansion (optional, ``DECConfig.use_delays=True``) adds a shift
 register that gives each DEC neuron a spatio-temporal receptive field
-over the recent history of L1 firing — similar to the MATLAB ANNet L2
-delay taps (51 × 50 µs).
+over the recent history of L1 firing.
 
 Output is a boolean vector ``[16]`` plus a convenience hex property
 encoding which neurons fired as a uint16 bitmask.
@@ -47,6 +52,9 @@ import snntorch as snn
 from snn_agent.config import Config
 
 __all__ = ["DECLayer"]
+
+# Pre-computed bit values for hex encoding (avoids per-step list comprehension)
+_BIT_VALUES = np.array([1 << i for i in range(16)], dtype=np.uint16)
 
 
 class DECLayer:
@@ -90,15 +98,13 @@ class DECLayer:
         self.unit_threshold = float(dc.unit_threshold_factor * n_l1)
 
         # ── Neuron 0: any-fire (fixed weights = 1) ───────────────────
-        # Implemented separately (not in WTA group) so it doesn't
-        # compete with the unit neurons.
         self.lif_any = snn.Leaky(
             beta=beta,
             threshold=self.any_fire_threshold,
             reset_mechanism="zero",
         )
         self.mem_any = self.lif_any.init_leaky()
-        # Fixed weight: 1.0 for every delayed L1 input
+        # Fixed weight
         self._w_any = torch.ones(self.n_input, dtype=torch.float32)
 
         # ── Neurons 1–15: learned unit neurons (WTA) ─────────────────
@@ -138,6 +144,12 @@ class DECLayer:
 
         # Pre-allocated buffers
         self._x_buf = torch.zeros(self.n_input, dtype=torch.float32)
+        # Mirror of pre-spike times for vectorized STDP
+        self._last_pre_spike_t = torch.full(
+            (self.n_input,), -9999, dtype=torch.int64
+        )
+        # Pre-allocated CPU output buffer
+        self._out_buf = np.zeros(self.N_DEC, dtype=bool)
 
         # DN integration window (keep gate open N samples after DN spike)
         _efs = cfg.effective_fs()
@@ -169,10 +181,11 @@ class DECLayer:
             Boolean array ``[16]`` — which DEC neurons fired.
         """
         self.t += 1
-        out = np.zeros(self.N_DEC, dtype=bool)
+        out = self._out_buf
+        out[:] = False
 
         # ── Update delay buffer ───────────────────────────────────────
-        self._delay_buf.append(l1_spikes.astype(bool).copy())
+        self._delay_buf.append(l1_spikes.astype(bool, copy=True))
 
         # ── DN gate: integrate while DN is active or within post-DN window ──
         if dn_spike:
@@ -191,12 +204,14 @@ class DECLayer:
 
         # Track pre-spike times
         active = np.flatnonzero(flat_input)
-        if len(active) > 0:
+        n_active = len(active)
+        if n_active > 0:
             self.last_pre_spike[active] = self.t
+            self._last_pre_spike_t[active] = self.t
 
         # Build input tensor
         self._x_buf.zero_()
-        if len(active) > 0:
+        if n_active > 0:
             self._x_buf[active] = 1.0
 
         # ── Neuron 0: any-fire ────────────────────────────────────────
@@ -224,36 +239,52 @@ class DECLayer:
             spk_u = spk_u.squeeze(0)
             self.mem_unit = self.mem_unit.squeeze(0)
 
-        unit_spikes = spk_u.numpy().astype(bool)
+        unit_spikes_np = spk_u.numpy()
+        unit_spikes = unit_spikes_np > 0.5
 
-        # Enforce refractory + STDP on winners
-        for w in np.flatnonzero(unit_spikes):
-            if (self.t - self.last_post_spike[w]) <= self.refractory:
-                unit_spikes[w] = False
-                continue
-            self.last_post_spike[w] = self.t
-            if not self.freeze:
-                self._stdp(int(w))
+        # Refractory enforcement + vectorized STDP
+        winners_raw = np.flatnonzero(unit_spikes)
+        if len(winners_raw) > 0:
+            dt = self.t - self.last_post_spike[winners_raw]
+            refractory_mask = dt <= self.refractory
+            if refractory_mask.any():
+                unit_spikes[winners_raw[refractory_mask]] = False
+            valid_winners = winners_raw[~refractory_mask]
+            if len(valid_winners) > 0:
+                self.last_post_spike[valid_winners] = self.t
+                if not self.freeze:
+                    self._stdp_vectorized(valid_winners)
 
         out[1:] = unit_spikes
 
-        # ── Encode as hex bitmask ─────────────────────────────────────
-        self._last_hex = int(sum(1 << i for i in range(self.N_DEC) if out[i]))
+        # ── Encode as hex bitmask (vectorized) ────────────────────────
+        self._last_hex = int(_BIT_VALUES[out].sum())
 
         return out
 
-    # ── STDP ──────────────────────────────────────────────────────────
-    def _stdp(self, winner: int) -> None:
-        """Asymmetric Hebbian STDP on the winning unit neuron's column."""
-        w = self.W[:, winner].numpy()
+    # ── Vectorized STDP (batched, no Python for-loop) ───────────────
+    def _stdp_vectorized(self, winners: np.ndarray) -> None:
+        """Asymmetric Hebbian STDP on all winning unit neurons simultaneously."""
+        n_winners = len(winners)
+        if n_winners == 0:
+            return
+
+        win_idx = torch.from_numpy(winners.astype(np.int64))
+
+        # Extract winning columns: [n_input, n_winners]
+        w_cols = self.W[:, win_idx]
 
         # Global LTD
-        w += self.ltd
+        w_cols = w_cols + self.ltd
 
         # LTP for recently active pre-synaptic inputs
-        dt = self.t - self.last_pre_spike
-        causal = (dt <= self.ltp_win) & (self.last_pre_spike > 0)
-        w[causal] += self.ltp
+        dt = self.t - self._last_pre_spike_t
+        causal = (dt <= self.ltp_win) & (self._last_pre_spike_t > 0)
+        ltp_delta = causal.unsqueeze(1).float() * self.ltp
+        w_cols = w_cols + ltp_delta
 
-        np.clip(w, self.w_lo, self.w_hi, out=w)
-        self.W[:, winner] = torch.from_numpy(w)
+        # Clamp
+        w_cols.clamp_(self.w_lo, self.w_hi)
+
+        # Write back
+        self.W[:, win_idx] = w_cols

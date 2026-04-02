@@ -25,14 +25,16 @@
 
 {% block extra_scripts %}
 <script type="module">
-import { connect, sendCmd, sendRaw, onMessage } from "{% static 'dashboard/js/websocket.js' %}";
-import { init as wfInit, push as wfPush, setTimeWindow, setChannel as wfSetCh } from "{% static 'dashboard/js/waveform.js' %}";
-import { init as rastInit, push as rastPush, setTimeWindow as rastSetTW, setChannel as rastSetCh } from "{% static 'dashboard/js/raster.js' %}";
-import { init as netInit, update as netUpdate, setChannel as netSetCh } from "{% static 'dashboard/js/network_viz.js' %}";
-import { init as ctrlInit, initDNThreshold, getTimeWindowMs } from "{% static 'dashboard/js/controls.js' %}";
-import { update as statsUpdate, setChannel as statsSetCh } from "{% static 'dashboard/js/stats.js' %}";
-import { init as launcherInit, handleStatus } from "{% static 'dashboard/js/launcher.js' %}";
-import { init as chInit, update as chUpdate, getNumChannels } from "{% static 'dashboard/js/channels.js' %}";
+import { connect, sendCmd, sendRaw, onMessage } from "{% static 'dashboard/js/websocket.js' %}?v=2";
+import { init as wfInit, push as wfPush, setTimeWindow, setChannel as wfSetCh } from "{% static 'dashboard/js/waveform.js' %}?v=2";
+import { init as rastInit, push as rastPush, setTimeWindow as rastSetTW, setChannel as rastSetCh } from "{% static 'dashboard/js/raster.js' %}?v=2";
+import { init as netInit, update as netUpdate, setChannel as netSetCh } from "{% static 'dashboard/js/network_viz.js' %}?v=2";
+import { init as ctrlInit, initDNThreshold, getTimeWindowMs } from "{% static 'dashboard/js/controls.js' %}?v=2";
+import { update as statsUpdate, setChannel as statsSetCh } from "{% static 'dashboard/js/stats.js' %}?v=2";
+import { init as launcherInit, handleStatus } from "{% static 'dashboard/js/launcher.js' %}?v=2";
+import { init as chInit, update as chUpdate, getNumChannels, preCreateChannels } from "{% static 'dashboard/js/channels.js' %}?v=2";
+
+const NUM_CHANNELS = {{ num_channels|default:'1' }};
 
 // ── Init renderers ─────────────────────────────────────────────────
 wfInit({ wave: 'wave', dn: 'dn_cv', ng: 'ng_cv', ctrl: 'ctrl_cv' });
@@ -46,6 +48,8 @@ launcherInit(sendRaw, getNumChannels);
 chInit(ch => {
   wfSetCh(ch); rastSetCh(ch); netSetCh(ch); statsSetCh(ch);
 });
+// Pre-create channel cards if we know the count from Django context
+if (NUM_CHANNELS > 1) preCreateChannels(NUM_CHANNELS);
 
 // ── Time window slider ────────────────────────────────────────────
 window.addEventListener('timeWindowChange', e => {

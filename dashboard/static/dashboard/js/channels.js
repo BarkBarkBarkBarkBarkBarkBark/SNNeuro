@@ -87,6 +87,20 @@ export function setChannel(ch) {
   _selectChannel(ch);
 }
 
+/**
+ * Pre-create channel cards for a known number of channels.
+ * Called at page load when the channel count is known from Django context,
+ * so the strip is visible immediately (instead of waiting for WS messages).
+ * @param {number} n — number of channels to pre-create
+ */
+export function preCreateChannels(n) {
+  for (let i = 0; i < n; i++) {
+    if (_channels[i] === undefined) _addChannel(i);
+  }
+  const strip = document.getElementById('channel-strip');
+  if (strip && n > 1) strip.style.display = '';
+}
+
 // ── Internals ──────────────────────────────────────────────────────────────────
 
 /** Create a channel card and append it to the strip. */

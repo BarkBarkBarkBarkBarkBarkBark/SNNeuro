@@ -48,8 +48,14 @@ class SpikeEncoder:
         self.n_centers: int = 0
         self.n_afferents: int = 0
 
-        # Shift register
-        self._shift_reg: np.ndarray | None = None
+        # Circular shift register (replaces np.roll for O(1) writes)
+        self._ring: np.ndarray | None = None   # flat bool ring buffer
+        self._ring_len: int = 0                  # n_centers * step_size * twindow
+        self._ring_head: int = 0                 # write pointer
+        # Pre-built read indices for subsample extraction (avoids reshape/slice per step)
+        self._read_indices: np.ndarray | None = None
+        # Pre-allocated output buffer (avoids ravel allocation per step)
+        self._out_buf: np.ndarray | None = None
 
         # Running noise / signal stats
         self._abs_buf: list[float] = []
@@ -79,22 +85,26 @@ class SpikeEncoder:
             else:
                 return np.zeros(0, dtype=bool)
 
-        # In-place amplitude bin activation — zero heap allocations
-        np.subtract(self.centers, sample, out=self._abs_diff)
-        np.abs(self._abs_diff, out=self._abs_diff)
-        np.less_equal(self._abs_diff, self.dvm, out=self._active_bool)
+        # ── Circular buffer write (O(1) — no array copy) ─────────────
+        ring = self._ring
+        nc = self.n_centers
+        head = self._ring_head
 
-        # Shift register: slide history left, insert new column on the right
-        reg = self._shift_reg_2d                 # [n_centers, step_size*twindow]
-        reg[:, :-1] = reg[:, 1:]                 # in-place left shift (no alloc)
-        reg[:, -1]  = self._active_bool          # newest sample at rightmost column
+        # Activate amplitude bins: vectorised |centres − sample| ≤ dvm
+        active = np.abs(self.centers - sample) <= self.dvm
 
-        # For step_size>1: fill subsampled output buffer
-        if self.step_size > 1:
-            np.copyto(self._aff_out_2d, reg[:, :: self.step_size])
-        # For step_size==1: _aff_out IS reg.ravel() — already up to date (zero-copy)
+        # Write activated bins at head position in the ring
+        ring[head:head + nc] = active
+        # Advance head (mod ring length)
+        self._ring_head = (head + nc) % self._ring_len
 
-        return self._aff_out  # persistent view — no allocation, no copy
+        # ── Read subsampled delay taps via pre-built index array ──────
+        # _read_indices is shape [n_afferents] and contains the ring
+        # positions to read (offset by current head), built once at
+        # calibration time.  We add the current head and wrap.
+        idx = (self._read_indices + self._ring_head) % self._ring_len
+        np.take(ring, idx, out=self._out_buf)
+        return self._out_buf
 
     @property
     def is_calibrated(self) -> bool:
@@ -116,27 +126,34 @@ class SpikeEncoder:
         self.n_centers = len(self.centers)
         self.n_afferents = self.n_centers * self.twindow
 
+        # ── Circular ring buffer (replaces old shift register) ────────
+        self._ring_len = self.n_centers * self.step_size * self.twindow
+        self._ring = np.zeros(self._ring_len, dtype=bool)
+        self._ring_head = 0
+
+        # ── Pre-build read indices for subsampled delay taps ──────────
+        # The original code did:
+        #   reshaped = ring.reshape(step_size*twindow, n_centres).T
+        #   out = reshaped[:, ::step_size]  # shape [n_centres, twindow]
+        #   return out.ravel()
+        #
+        # We pre-compute the flat indices so each step is just a gather.
+        # Row c, col t in the [n_centres × twindow] output corresponds to
+        # flat ring position:  (t * step_size) * n_centres + c
+        # Indices are relative to the *oldest* entry in the ring, which
+        # at read time sits at ring_head (because we just advanced head
+        # past the newest write).
         nc = self.n_centers
-
-        # 2-D shift register [n_centers, step_size * twindow] — C-contiguous.
-        # Column 0 = oldest sample, column -1 = newest.
-        self._shift_reg_2d = np.zeros((nc, self.step_size * self.twindow), dtype=bool)
-
-        # _aff_out is a LIVE VIEW of the shift register for step_size=1
-        # (no copy ever needed — direct memory access into the register).
-        # For step_size>1 it’s a pre-allocated flat buffer filled by copyto.
-        if self.step_size == 1:
-            self._aff_out = self._shift_reg_2d.ravel()       # zero-copy persistent view
-        else:
-            self._aff_out = np.zeros(self.n_afferents, dtype=bool)  # pre-alloc copy target
-            self._aff_out_2d = self._aff_out.reshape(nc, self.twindow)  # view for copyto
-
-        # Pre-allocated scratch buffers for amplitude-bin computation (zero allocations per step)
-        self._abs_diff    = np.empty(nc, dtype=np.float64)
-        self._active_bool = np.empty(nc, dtype=bool)
-
-        # Active indices cache — updated every step, read by sparse downstream layers
-        self._active_indices: np.ndarray = np.empty(0, dtype=np.intp)
+        ss = self.step_size
+        tw = self.twindow
+        indices = np.empty(self.n_afferents, dtype=np.intp)
+        k = 0
+        for c in range(nc):
+            for t in range(tw):
+                indices[k] = (t * ss) * nc + c
+                k += 1
+        self._read_indices = indices
+        self._out_buf = np.empty(self.n_afferents, dtype=bool)
 
         self._abs_buf.clear()
         self._calibrated = True

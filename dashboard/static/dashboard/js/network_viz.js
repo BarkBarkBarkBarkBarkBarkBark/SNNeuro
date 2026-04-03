@@ -1,10 +1,13 @@
 /**
  * network_viz.js — Network topology diagram renderer.
- * Ported directly from the inline drawNetworkViz() in index.html.
+ *
+ * Per-channel snapshot state: every channel's latest network state is
+ * kept in memory.  The render loop draws whichever channel is active.
+ * Switching channels instantly shows the latest state — no data loss.
  *
  * Exported API:
  *   init(canvasId)   — bind canvas and start render loop
- *   update(msg)      — feed a stream broadcast message
+ *   update(msg)      — feed a stream broadcast message (any channel)
  *   setChannel(ch)   — active channel filter
  */
 
@@ -16,14 +19,23 @@ for (let i = 1; i < N_DEC; i++) {
   DEC_COLORS.push(`hsl(${((i - 1) / (N_DEC - 1)) * 300}, 100%, 60%)`);
 }
 
-// ── State ────────────────────────────────────────────────────────────────────
-let membrane   = new Float32Array(N_L1);
-let dnActive   = false;
-let ngFactor   = 1.0;
-let inhActive  = false;
-let l1Spikes   = new Set();
-let decSpikes  = new Set();
-let decHex     = '0x0000';
+// ── Per-channel state (lazily created) ───────────────────────────────────────
+const _channels = {};
+
+function _ensureChannel(ch) {
+  if (_channels[ch]) return _channels[ch];
+  _channels[ch] = {
+    membrane:  new Float32Array(N_L1),
+    dnActive:  false,
+    ngFactor:  1.0,
+    inhActive: false,
+    l1Spikes:  new Set(),
+    decSpikes: new Set(),
+    decHex:    '0x0000',
+  };
+  return _channels[ch];
+}
+
 let activeChannel = 0;
 
 let ctx;
@@ -38,19 +50,23 @@ export function init(canvasId) {
   requestAnimationFrame(_render);
 }
 
+/**
+ * Ingest a broadcast message.  State is ALWAYS updated for the
+ * channel that sent it — even if not currently displayed.
+ */
 export function update(msg) {
-  const ch = msg.channel ?? 0;
-  if (ch !== activeChannel) return;
+  const ch    = msg.channel ?? 0;
+  const state = _ensureChannel(ch);
 
-  dnActive  = (msg.dn_flags || []).some(Boolean);
-  ngFactor  = msg.noise_gate ?? 1.0;
-  inhActive = msg.inhibition_active ?? false;
-  l1Spikes  = new Set(msg.spikes || []);
-  decSpikes = new Set(msg.dec_spikes || []);
-  decHex    = msg.dec_hex || '0x0000';
+  state.dnActive  = (msg.dn_flags || []).some(Boolean);
+  state.ngFactor  = msg.noise_gate ?? 1.0;
+  state.inhActive = msg.inhibition_active ?? false;
+  state.l1Spikes  = new Set(msg.spikes || []);
+  state.decSpikes = new Set(msg.dec_spikes || []);
+  state.decHex    = msg.dec_hex || '0x0000';
   if (msg.l1_membrane) {
     const m = msg.l1_membrane;
-    for (let i = 0; i < Math.min(m.length, N_L1); i++) membrane[i] = m[i];
+    for (let i = 0; i < Math.min(m.length, N_L1); i++) state.membrane[i] = m[i];
   }
 }
 
@@ -71,6 +87,16 @@ function _render(ts) {
 function _draw() {
   ctx.fillStyle = '#020202';
   ctx.fillRect(0, 0, NET_W, NET_H);
+
+  // Read from the active channel's snapshot (or defaults if no data yet)
+  const state     = _channels[activeChannel] || _ensureChannel(activeChannel);
+  const membrane  = state.membrane;
+  const dnActive  = state.dnActive;
+  const ngFactor  = state.ngFactor;
+  const inhActive = state.inhActive;
+  const l1Spikes  = state.l1Spikes;
+  const decSpikes = state.decSpikes;
+  const decHex    = state.decHex;
 
   const margin = 25;
   const colX = [50, 130, 210, 290];

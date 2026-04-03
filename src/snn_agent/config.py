@@ -183,7 +183,7 @@ class Config:
     dec: DECConfig = field(default_factory=DECConfig)
 
     # Feature flags
-    use_dec: bool = True
+    use_dec: bool = False
 
     # Viz
     broadcast_every: int = 5

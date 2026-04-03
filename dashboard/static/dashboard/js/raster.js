@@ -1,12 +1,13 @@
 /**
  * raster.js — L1 template raster and DEC decoder raster renderers.
  *
- * Uses the same ring-buffer approach as waveform.js:
- * spikes are stored as timestamped events and drawn within the visible window.
+ * Per-channel event buffers: all incoming spike data is stored regardless
+ * of which channel is currently displayed.  Switching channels instantly
+ * shows the latest raster state — no data loss.
  *
  * Exported API:
  *   init(ids)          — bind canvas elements
- *   push(msg)          — ingest stream broadcast
+ *   push(msg)          — ingest stream broadcast (any channel)
  *   setTimeWindow(ms)  — sync time window with waveform
  *   setChannel(ch)     — active channel filter
  */
@@ -20,14 +21,24 @@ for (let i = 1; i < N_DEC; i++) {
   DEC_COLORS.push(`hsl(${((i - 1) / (N_DEC - 1)) * 300}, 100%, 60%)`);
 }
 
-// ── State ────────────────────────────────────────────────────────────────────
-// Spike events stored as {t: absoluteSampleIndex, id: neuronIndex}
+// ── Per-channel state (lazily created) ───────────────────────────────────────
 const MAX_EVENTS = 8192;
-const l1Events  = new Array(MAX_EVENTS);
-const decEvents = new Array(MAX_EVENTS);
-let l1Head  = 0, decHead  = 0;
-let sampleClock = 0;    // running count of pushed samples
-let timeWindowMs = 100;
+const _channels = {};
+
+function _ensureChannel(ch) {
+  if (_channels[ch]) return _channels[ch];
+  _channels[ch] = {
+    l1Events:   new Array(MAX_EVENTS),
+    decEvents:  new Array(MAX_EVENTS),
+    l1Head:     0,
+    decHead:    0,
+    sampleClock: 0,
+  };
+  return _channels[ch];
+}
+
+// ── Global render state ──────────────────────────────────────────────────────
+let timeWindowMs  = 100;
 let activeChannel = 0;
 
 // Canvas contexts
@@ -51,21 +62,25 @@ export function init(ids) {
   requestAnimationFrame(_render);
 }
 
+/**
+ * Ingest a broadcast message.  Spike events are ALWAYS pushed into
+ * the channel's own buffer — even if not currently displayed.
+ */
 export function push(msg) {
-  const ch = msg.channel ?? 0;
-  if (ch !== activeChannel) return;
+  const ch    = msg.channel ?? 0;
+  const state = _ensureChannel(ch);
 
   const nSamples = (msg.samples || []).length;
-  const t = sampleClock;
-  sampleClock += nSamples;
+  const t = state.sampleClock;
+  state.sampleClock += nSamples;
 
   for (const id of (msg.spikes || [])) {
-    l1Events[l1Head % MAX_EVENTS] = { t: t + nSamples, id };
-    l1Head++;
+    state.l1Events[state.l1Head % MAX_EVENTS] = { t: t + nSamples, id };
+    state.l1Head++;
   }
   for (const id of (msg.dec_spikes || [])) {
-    decEvents[decHead % MAX_EVENTS] = { t: t + nSamples, id };
-    decHead++;
+    state.decEvents[state.decHead % MAX_EVENTS] = { t: t + nSamples, id };
+    state.decHead++;
   }
 }
 
@@ -87,12 +102,13 @@ function _clear(ctx, h) {
 const EFFECTIVE_FS = 20000;
 
 function _render() {
-  if (rastCtx) _drawL1();
-  if (decCtx)  _drawDEC();
+  const state = _channels[activeChannel];
+  if (rastCtx) _drawL1(state);
+  if (decCtx)  _drawDEC(state);
   requestAnimationFrame(_render);
 }
 
-function _drawL1() {
+function _drawL1(state) {
   const ctx = rastCtx;
   _clear(ctx, RASTER_H);
 
@@ -106,13 +122,15 @@ function _drawL1() {
     ctx.stroke();
   }
 
+  if (!state) return;
+
   const windowSamples = Math.ceil(timeWindowMs * EFFECTIVE_FS / 1000);
-  const tNow = sampleClock;
-  const tStart = tNow - windowSamples;
+  const tNow   = state.sampleClock;
+  const tStart  = tNow - windowSamples;
 
   ctx.fillStyle = '#00ff41';
-  for (let i = l1Head - 1; i >= Math.max(0, l1Head - MAX_EVENTS); i--) {
-    const ev = l1Events[i % MAX_EVENTS];
+  for (let i = state.l1Head - 1; i >= Math.max(0, state.l1Head - MAX_EVENTS); i--) {
+    const ev = state.l1Events[i % MAX_EVENTS];
     if (!ev || ev.t < tStart) break;
     if (ev.id < N_L1) {
       const x = Math.floor((ev.t - tStart) / windowSamples * CVW);
@@ -121,16 +139,18 @@ function _drawL1() {
   }
 }
 
-function _drawDEC() {
+function _drawDEC(state) {
   const ctx = decCtx;
   _clear(ctx, DEC_H);
 
-  const windowSamples = Math.ceil(timeWindowMs * EFFECTIVE_FS / 1000);
-  const tNow = sampleClock;
-  const tStart = tNow - windowSamples;
+  if (!state) return;
 
-  for (let i = decHead - 1; i >= Math.max(0, decHead - MAX_EVENTS); i--) {
-    const ev = decEvents[i % MAX_EVENTS];
+  const windowSamples = Math.ceil(timeWindowMs * EFFECTIVE_FS / 1000);
+  const tNow   = state.sampleClock;
+  const tStart  = tNow - windowSamples;
+
+  for (let i = state.decHead - 1; i >= Math.max(0, state.decHead - MAX_EVENTS); i--) {
+    const ev = state.decEvents[i % MAX_EVENTS];
     if (!ev || ev.t < tStart) break;
     if (ev.id < N_DEC) {
       ctx.fillStyle = DEC_COLORS[ev.id];

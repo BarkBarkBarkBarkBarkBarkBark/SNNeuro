@@ -35,12 +35,7 @@ import subprocess
 import time
 from pathlib import Path
 
-# Prevent PyTorch/OpenMP from spawning threads for tiny matmuls.
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("MKL_NUM_THREADS", "1")
-
 import numpy as np
-import torch
 import websockets
 
 # Fast JSON serialisation (orjson is ~5× faster than stdlib json)
@@ -54,7 +49,6 @@ except ImportError:
 
 from snn_agent.config import Config, DEFAULT_CONFIG
 from snn_agent.core.pipeline import build_pipeline, complete_pipeline
-from snn_agent.core.template import TemplateLayer
 
 # ── Shared state ──────────────────────────────────────────────────────────────
 ws_clients: set = set()
@@ -64,8 +58,7 @@ pipeline_refs: dict = {}
 _broadcast_queue: asyncio.Queue | None = None
 _broadcast_task: asyncio.Task | None = None
 
-# Batched runtime thresholds
-CUDA_BATCH_CHANNEL_THRESHOLD = 8
+# Batched runtime constants
 RAW_BLOCK_SIZE = 256
 
 # Simple runtime profiling counters (EMA-style averages)
@@ -491,39 +484,41 @@ async def _process_stream(
 
 async def _process_synthetic_batched(cfg: Config, traces: np.ndarray, fs: float) -> None:
     """
-    Batched multi-channel synthetic processing.
+    Multi-channel synthetic processing.
 
-    Processes channel blocks together per chunk and computes L1 current
-    projection in a single batched matmul.
+    Each channel runs its own independent pipeline (preprocessor → encoder →
+    DN → noise gate → inhibitor → L1 → DEC → decoder).  Channels may have
+    different ``n_afferents`` after calibration, so all per-channel state is
+    kept in plain Python lists rather than fixed-shape numpy arrays.
     """
     num_channels = traces.shape[1]
     broadcast_every = cfg.broadcast_every
 
+    # ── Per-channel pipeline scaffolding ──────────────────────────────
     early = [build_pipeline(cfg) for _ in range(num_channels)]
     preprocs = [e[0] for e in early]
     encoders = [e[1] for e in early]
     effective_cfgs = [e[2] for e in early]
-    pipeline_objs = [None] * num_channels
+    pipeline_objs: list = [None] * num_channels
 
     step_counts = np.zeros(num_channels, dtype=np.int64)
-    sample_buf = [[] for _ in range(num_channels)]
-    dn_buf = [[] for _ in range(num_channels)]
-    l1_spike_sets = [set() for _ in range(num_channels)]
-    dec_spike_sets = [set() for _ in range(num_channels)]
+    sample_buf: list[list] = [[] for _ in range(num_channels)]
+    dn_buf: list[list] = [[] for _ in range(num_channels)]
+    l1_spike_sets: list[set] = [set() for _ in range(num_channels)]
+    dec_spike_sets: list[set] = [set() for _ in range(num_channels)]
     last_noise_gate = np.ones(num_channels, dtype=np.float32)
     last_inhibition = np.zeros(num_channels, dtype=bool)
     any_l1_fired_prev = np.zeros(num_channels, dtype=bool)
     last_control = np.zeros(num_channels, dtype=np.float32)
     last_confidence = np.zeros(num_channels, dtype=np.float32)
 
-    # Contiguous per-channel state buffers (profiling/fast status snapshots)
+    # Membrane snapshot — n_neurons is a config constant, safe to share.
     n_neurons = cfg.l1.n_neurons
     channel_membrane = np.zeros((num_channels, n_neurons), dtype=np.float32)
-    channel_last_post = np.full((num_channels, n_neurons), -9999, dtype=np.int64)
-    channel_last_pre: np.ndarray | None = None
 
     ctrl_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     ctrl_addr = (cfg.control_target_host, cfg.udp_control_port)
+    pipeline_refs_set = False
     wall_t0 = time.perf_counter()
 
     n_total = traces.shape[0]
@@ -531,18 +526,11 @@ async def _process_synthetic_batched(cfg: Config, traces: np.ndarray, fs: float)
         block_t0 = time.perf_counter()
         raw_block = traces[raw_start:raw_start + RAW_BLOCK_SIZE, :]
         pp_blocks = [preprocs[ch].step_batch(raw_block[:, ch]) for ch in range(num_channels)]
-        if not pp_blocks:
-            continue
         n_ticks = min(len(b) for b in pp_blocks)
         if n_ticks == 0:
             continue
 
         for tick in range(n_ticks):
-            aff_rows: list[np.ndarray] = []
-            weight_rows: list[torch.Tensor] = []
-            active_channels: list[int] = []
-            per_channel_payload: list[tuple[int, np.ndarray, bool, float]] = []
-
             for ch in range(num_channels):
                 pp_sample = float(pp_blocks[ch][tick])
                 step_counts[ch] += 1
@@ -553,84 +541,72 @@ async def _process_synthetic_batched(cfg: Config, traces: np.ndarray, fs: float)
                     dn_buf[ch].append(0)
                     continue
 
+                # ── Lazy pipeline completion (needs n_afferents) ──────
                 if pipeline_objs[ch] is None:
                     pipeline_objs[ch] = complete_pipeline(
                         cfg, effective_cfgs[ch], preprocs[ch], encoders[ch]
                     )
-                    if channel_last_pre is None:
-                        n_aff = pipeline_objs[ch].template.n_aff
-                        channel_last_pre = np.full((num_channels, n_aff), -9999, dtype=np.int64)
-                    if ch == 0:
+                    # Expose the first-calibrated channel's objects for
+                    # WebSocket live-tuning.  Other channels' objects are
+                    # not reachable from the WS handler (acceptable: the
+                    # tuning parameters are shared via Config anyway).
+                    if not pipeline_refs_set:
                         pipeline_refs["dn"] = pipeline_objs[ch].attention
                         pipeline_refs["template"] = pipeline_objs[ch].template
                         pipeline_refs["decoder"] = pipeline_objs[ch].decoder
                         pipeline_refs["inhibitor"] = pipeline_objs[ch].inhibitor
                         pipeline_refs["noise_gate"] = pipeline_objs[ch].noise_gate
                         pipeline_refs["effective_fs"] = preprocs[ch].effective_fs
+                        pipeline_refs_set = True
 
                 p = pipeline_objs[ch]
-                assert p is not None
+
+                # ── DN (attention) ────────────────────────────────────
                 dn_spike = p.attention.step(afferents)
                 dn_buf[ch].append(int(dn_spike))
+
+                # ── Suppression: noise gate + inhibitor ───────────────
                 suppression = 1.0
                 if p.noise_gate is not None:
                     suppression = p.noise_gate.step(pp_sample)
                     last_noise_gate[ch] = suppression
                 if p.inhibitor is not None:
                     inh_factor = p.inhibitor.gate(
-                        p.template.last_current_magnitude, bool(any_l1_fired_prev[ch])
+                        p.template.last_current_magnitude,
+                        bool(any_l1_fired_prev[ch]),
                     )
                     suppression *= inh_factor
                     last_inhibition[ch] = p.inhibitor.active
 
-                active_channels.append(ch)
-                aff_rows.append(afferents.astype(np.float32, copy=False))
-                weight_rows.append(p.template.W)
-                per_channel_payload.append((ch, afferents, dn_spike, suppression))
+                # ── L1 template layer ─────────────────────────────────
+                l1_spikes = p.template.step(afferents, dn_spike, suppression)
+                any_l1_fired_prev[ch] = bool(np.any(l1_spikes))
+                for idx in np.flatnonzero(l1_spikes):
+                    l1_spike_sets[ch].add(int(idx))
 
-            if active_channels:
-                aff_batch = torch.from_numpy(np.stack(aff_rows, axis=0))
-                w_batch = torch.stack(weight_rows, dim=0)
-                use_cuda = len(active_channels) >= CUDA_BATCH_CHANNEL_THRESHOLD
-                currents = TemplateLayer.project_currents_batched(
-                    aff_batch, w_batch, use_cuda=use_cuda
-                )
+                # ── DEC layer (optional) ──────────────────────────────
+                decoder_input = l1_spikes
+                if p.dec_layer is not None:
+                    dec_spikes = p.dec_layer.step(l1_spikes, dn_spike)
+                    for idx in np.flatnonzero(dec_spikes):
+                        dec_spike_sets[ch].add(int(idx))
+                    decoder_input = dec_spikes
 
-                for i, (ch, afferents, dn_spike, suppression) in enumerate(per_channel_payload):
-                    p = pipeline_objs[ch]
-                    assert p is not None
-                    l1_spikes = p.template.step(
-                        afferents,
-                        dn_spike,
-                        suppression,
-                        precomputed_current=currents[i],
-                    )
-                    any_l1_fired_prev[ch] = bool(np.any(l1_spikes))
-                    for idx in np.flatnonzero(l1_spikes):
-                        l1_spike_sets[ch].add(int(idx))
+                # ── Decoder + control output ──────────────────────────
+                ctrl_val, confidence = p.decoder.step(decoder_input, dn_spike)
+                last_control[ch] = ctrl_val
+                last_confidence[ch] = confidence
+                if p.dec_layer is not None:
+                    hex_word = p.dec_layer.hex_output
+                    if hex_word > 0:
+                        ctrl_sock.sendto(struct.pack("!H", hex_word), ctrl_addr)
+                elif abs(ctrl_val) > 0.05:
+                    ctrl_sock.sendto(struct.pack("!ff", ctrl_val, confidence), ctrl_addr)
 
-                    decoder_input = l1_spikes
-                    if p.dec_layer is not None:
-                        dec_spikes = p.dec_layer.step(l1_spikes, dn_spike)
-                        for idx in np.flatnonzero(dec_spikes):
-                            dec_spike_sets[ch].add(int(idx))
-                        decoder_input = dec_spikes
+                # Snapshot membrane for broadcast
+                channel_membrane[ch, :] = p.template.mem.detach().numpy()
 
-                    ctrl_val, confidence = p.decoder.step(decoder_input, dn_spike)
-                    last_control[ch] = ctrl_val
-                    last_confidence[ch] = confidence
-                    if p.dec_layer is not None:
-                        hex_word = p.dec_layer.hex_output
-                        if hex_word > 0:
-                            ctrl_sock.sendto(struct.pack("!H", hex_word), ctrl_addr)
-                    elif abs(ctrl_val) > 0.05:
-                        ctrl_sock.sendto(struct.pack("!ff", ctrl_val, confidence), ctrl_addr)
-
-                    channel_membrane[ch, :] = p.template.mem.detach().numpy()
-                    channel_last_post[ch, :] = p.template.last_post_spike
-                    if channel_last_pre is not None:
-                        channel_last_pre[ch, :] = p.template.last_pre_spike
-
+            # ── Broadcast (per-channel, every broadcast_every ticks) ──
             for ch in range(num_channels):
                 if step_counts[ch] % broadcast_every == 0 and sample_buf[ch]:
                     p = pipeline_objs[ch]
@@ -851,15 +827,29 @@ async def _launch_mode(mode: str, **kwargs) -> dict:
             _num_channels = num_channels
 
             if num_channels > 1:
-                # Generate all channels at once, run batched multi-channel pipeline
-                recording, _ = si.generate_ground_truth_recording(
-                    durations=[syn.duration_s],
-                    sampling_frequency=float(syn.fs),
-                    num_channels=num_channels,
-                    num_units=syn.num_units,
-                    seed=syn.seed,
+                # Generate independent synthetic recordings per channel.
+                # Each channel gets a unique seed and slightly varied unit
+                # count so the encoders calibrate to genuinely different
+                # signal statistics — stress-testing multi-channel independence.
+                ch_traces = []
+                for ch_i in range(num_channels):
+                    ch_seed = syn.seed + ch_i
+                    ch_units = max(1, syn.num_units + (ch_i % 3) - 1)
+                    rec_i, _ = si.generate_ground_truth_recording(
+                        durations=[syn.duration_s],
+                        sampling_frequency=float(syn.fs),
+                        num_channels=1,
+                        num_units=ch_units,
+                        seed=ch_seed,
+                    )
+                    ch_traces.append(
+                        rec_i.get_traces(segment_index=0).ravel()
+                    )
+                # Column-stack: (n_samples, num_channels)
+                min_len = min(t.shape[0] for t in ch_traces)
+                traces = np.column_stack(
+                    [t[:min_len] for t in ch_traces]
                 )
-                traces = recording.get_traces(segment_index=0)  # (n_samples, n_ch)
                 _stream_tasks.append(asyncio.create_task(
                     _process_synthetic_batched(cfg, traces, float(syn.fs))
                 ))

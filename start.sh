@@ -79,6 +79,20 @@ DAPHNE_CMD=(
 export DJANGO_SETTINGS_MODULE="snn_web.settings"
 export PYTHONPATH="$SCRIPT_DIR:$SCRIPT_DIR/src:${PYTHONPATH:-}"
 
+# ── Evict any stale processes still holding our ports ─────────────────────────
+_kill_port() {
+  local port="$1"
+  local pids
+  pids=$(lsof -ti tcp:"$port" 2>/dev/null || true)
+  if [[ -n "$pids" ]]; then
+    echo "   ⚠  Port $port in use — killing stale process(es): $pids"
+    kill -9 $pids 2>/dev/null || true
+    sleep 0.5
+  fi
+}
+_kill_port "$WEB_PORT"
+_kill_port 8765   # pipeline WebSocket port
+
 # ── Resolve display address ────────────────────────────────────────────────────
 # Try to find the LAN IP (exclude loopback); fall back to hostname.
 HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}')

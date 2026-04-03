@@ -85,11 +85,14 @@ class TemplateLayer:
         # Pre-allocate reusable tensors (avoids per-step allocation)
         self._x_buf = torch.zeros(n_afferents, dtype=torch.float32)
 
-        # snnTorch LIF (inhibition=True → WTA)
+        # snnTorch LIF — WTA is enforced manually after the forward pass
+        # (snnTorch's inhibition=True is marked unstable and drives inhibited
+        # neurons' membranes negative, conflicting with reset_mechanism='zero'
+        # and causing subtle STDP artefacts on sparsely active inputs).
         self.lif = snn.Leaky(
             beta=beta,
             threshold=self.threshold,
-            inhibition=True,
+            inhibition=False,
             reset_mechanism="zero",
         )
         self.mem = self.lif.init_leaky()
@@ -168,6 +171,20 @@ class TemplateLayer:
             spk, self.mem = self.lif(current.unsqueeze(0), self.mem.unsqueeze(0))
             spk = spk.squeeze(0)
             self.mem = self.mem.squeeze(0)
+
+        # ── Manual Winner-Take-All ────────────────────────────────────────
+        # If more than one neuron crossed threshold, keep only the one with
+        # the highest pre-reset membrane potential (largest current drive).
+        # All losers have their membrane reset to 0 — identical to what
+        # reset_mechanism='zero' does for the winner — so dynamics are
+        # consistent regardless of competition outcome.
+        if spk.sum() > 1:
+            # current already holds [n_neurons] drive values
+            winner = int(current.argmax().item())
+            mask = torch.zeros_like(spk)
+            mask[winner] = 1.0
+            spk = mask
+            self.mem = self.mem * (1.0 - mask)   # reset losers to 0
 
         # Convert spikes to bool numpy
         np.greater(spk.numpy(), 0.5, out=self._spk_cpu)

@@ -116,6 +116,7 @@ class TemplateLayer:
         afferents: np.ndarray,
         dn_spike: bool,
         suppression: float = 1.0,
+        precomputed_current: torch.Tensor | None = None,
     ) -> np.ndarray:
         """
         Advance one simulation step.
@@ -141,13 +142,16 @@ class TemplateLayer:
             self.last_pre_spike[active] = self.t
             self._last_pre_spike_t[active] = self.t
 
-        # Build input tensor (scatter active indices)
-        self._x_buf.zero_()
-        if n_active > 0:
-            self._x_buf[active] = 1.0
+        if precomputed_current is None:
+            # Build input tensor (scatter active indices)
+            self._x_buf.zero_()
+            if n_active > 0:
+                self._x_buf[active] = 1.0
 
-        # Compute input current: afferents @ W
-        current = self._x_buf @ self.W  # [n_neurons]
+            # Compute input current: afferents @ W
+            current = self._x_buf @ self.W  # [n_neurons]
+        else:
+            current = precomputed_current
 
         if dn_spike:
             current = current + self.dn_weight
@@ -185,6 +189,39 @@ class TemplateLayer:
                     self._stdp_vectorized(valid_winners)
 
         return self._spk_cpu
+
+    @staticmethod
+    def project_currents_batched(
+        afferents: torch.Tensor,
+        weights: torch.Tensor,
+        *,
+        use_cuda: bool = False,
+    ) -> torch.Tensor:
+        """
+        Project batched afferents to L1 currents in one batched matmul.
+
+        Parameters
+        ----------
+        afferents : torch.Tensor
+            Tensor of shape ``[channels, n_afferents]``.
+        weights : torch.Tensor
+            Tensor of shape ``[n_afferents, n_neurons]`` (shared across channels)
+            or ``[channels, n_afferents, n_neurons]`` (per-channel weights).
+        use_cuda : bool
+            If True and CUDA is available, compute on GPU.
+        """
+        if use_cuda and torch.cuda.is_available():
+            afferents = afferents.to("cuda", non_blocking=True)
+            weights = weights.to("cuda", non_blocking=True)
+
+        if weights.ndim == 2:
+            currents = afferents @ weights
+        else:
+            currents = torch.bmm(afferents.unsqueeze(1), weights).squeeze(1)
+
+        if use_cuda and torch.cuda.is_available():
+            currents = currents.to("cpu", non_blocking=True)
+        return currents
 
     # ── Vectorized STDP (batched, no Python for-loop) ───────────────
     def _stdp_vectorized(self, winners: np.ndarray) -> None:

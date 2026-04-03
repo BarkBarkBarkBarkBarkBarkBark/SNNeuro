@@ -1,0 +1,154 @@
+{% extends "dashboard/base.html" %}
+{% load static %}
+{% block title %}SNN Agent — Input Config{% endblock %}
+
+{% block content %}
+<h1>INPUT CONFIGURATION</h1>
+<div class="input-layout">
+
+  <form method="post" id="input-form">
+    {% csrf_token %}
+
+    <!-- ── Channel count ─────────────────────────────────── -->
+    <div class="input-section">
+      <div class="panel-label">CHANNELS</div>
+      <div class="input-row">
+        <label for="{{ form.num_channels.id_for_label }}">Number of channels</label>
+        {{ form.num_channels }}
+      </div>
+      <p class="input-help">{{ form.num_channels.help_text }}</p>
+      {% if form.num_channels.errors %}
+        <p class="error-msg">{{ form.num_channels.errors|join:", " }}</p>
+      {% endif %}
+    </div>
+
+    <!-- ── Source type ───────────────────────────────────── -->
+    <div class="input-section">
+      <div class="panel-label">SOURCE TYPE</div>
+      {% for radio in form.source_type %}
+      <div class="input-row">
+        {{ radio.tag }}
+        <label for="{{ radio.id_for_label }}" style="min-width:0; cursor:pointer;">
+          {{ radio.choice_label }}
+        </label>
+      </div>
+      {% endfor %}
+    </div>
+
+    <!-- ── Synthetic params ──────────────────────────────── -->
+    <div class="input-section source-section" id="section-synthetic">
+      <div class="panel-label">SYNTHETIC RECORDING</div>
+      <div class="input-row">
+        <label for="{{ form.synth_duration_s.id_for_label }}">Duration (s)</label>
+        {{ form.synth_duration_s }}
+      </div>
+      <div class="input-row">
+        <label for="{{ form.synth_num_units.id_for_label }}">Units per channel</label>
+        {{ form.synth_num_units }}
+      </div>
+      <div class="input-row">
+        <label for="{{ form.synth_noise_level.id_for_label }}">Noise level</label>
+        {{ form.synth_noise_level }}
+      </div>
+      <div class="input-row">
+        <label for="{{ form.synth_seed.id_for_label }}">Random seed</label>
+        {{ form.synth_seed }}
+      </div>
+    </div>
+
+    <!-- ── File params ───────────────────────────────────── -->
+    <div class="input-section source-section" id="section-file">
+      <div class="panel-label">FILE RECORDING (.ncs)</div>
+      <div class="input-row">
+        <label for="{{ form.file_path.id_for_label }}">File path</label>
+        {{ form.file_path }}
+        <button type="button" id="btn-browse" title="List .ncs files in data/raw/">📂</button>
+      </div>
+      <div id="file-list-msg" style="color:#444; font-size:0.6rem; margin-top:4px;"></div>
+    </div>
+
+    <!-- ── Electrode/LSL note ────────────────────────────── -->
+    <div class="input-section source-section" id="section-electrode">
+      <div class="panel-label">ELECTRODE INPUT (UDP)</div>
+      <p style="color:#444; font-size:0.65rem; line-height:1.6;">
+        Start the pipeline with:<br>
+        <code style="color:#00ff41;">snn-serve --mode electrode</code><br>
+        then send samples to UDP port 9001.
+      </p>
+    </div>
+
+    <div class="input-section source-section" id="section-lsl">
+      <div class="panel-label">LSL STREAM</div>
+      <p style="color:#444; font-size:0.65rem; line-height:1.6;">
+        Start the pipeline with:<br>
+        <code style="color:#00ff41;">snn-serve --mode lsl</code>
+      </p>
+    </div>
+
+    <!-- ── Decoder ───────────────────────────────────────── -->
+    <div class="input-section">
+      <div class="panel-label">DECODER</div>
+      <div class="input-row">
+        <label for="{{ form.decoder_strategy.id_for_label }}">Strategy</label>
+        {{ form.decoder_strategy }}
+      </div>
+    </div>
+
+    <button type="submit" class="btn-primary">▶ LAUNCH PIPELINE →</button>
+  </form>
+
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+// ── Show/hide source sections based on radio selection ────────────────────
+const sections = ['synthetic', 'file', 'electrode', 'lsl'];
+
+function updateSourceSections() {
+  const selected = document.querySelector('input[name="source_type"]:checked');
+  const val = selected ? selected.value : 'synthetic';
+  sections.forEach(s => {
+    const el = document.getElementById('section-' + s);
+    if (el) el.classList.toggle('active', s === val);
+  });
+}
+
+document.querySelectorAll('input[name="source_type"]').forEach(r =>
+  r.addEventListener('change', updateSourceSections)
+);
+updateSourceSections();
+
+// ── File browser button ───────────────────────────────────────────────────
+document.getElementById('btn-browse').addEventListener('click', async () => {
+  const msg = document.getElementById('file-list-msg');
+  msg.textContent = 'Scanning data/raw/…';
+  try {
+    const res = await fetch('/api/files/');
+    const data = await res.json();
+    if (data.files && data.files.length > 0) {
+      document.getElementById('id_file_path').value = data.files[0];
+      msg.textContent = `Found ${data.files.length} file(s) in ${data.directory}`;
+    } else {
+      msg.textContent = `No .ncs files in ${data.directory}`;
+    }
+  } catch (e) {
+    msg.textContent = 'Could not reach API: ' + e.message;
+  }
+});
+
+// ── Form submit: POST to API, then navigate to monitor ────────────────────
+document.getElementById('input-form').addEventListener('submit', async (e) => {
+  const sourceType = document.querySelector('input[name="source_type"]:checked')?.value;
+  // For file/synthetic, also kick off the pipeline via API before redirecting
+  // (electrode/lsl are started externally via CLI, so just redirect)
+  if (sourceType === 'synthetic' || sourceType === 'file') {
+    // The form POST stores the session config; the API endpoint kicks the pipeline.
+    // Both happen: form POST (for session) and API call (for pipeline start).
+    // We don't prevent default — the form POST happens normally and redirects to monitor.
+    // The monitor page itself handles launch via WS.
+  }
+  // For electrode/lsl: just let the form POST redirect naturally.
+});
+</script>
+{% endblock %}

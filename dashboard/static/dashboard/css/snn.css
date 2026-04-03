@@ -1,0 +1,312 @@
+/* ── snn.css — SNN Agent dashboard styles ─────────────────────────────────── */
+/* Extracted from index.html and extended for the Django multi-page layout. */
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: #0d0d0d;
+  color: #666;
+  font-family: 'Courier New', monospace;
+  padding: 18px;
+  user-select: none;
+}
+
+h1 {
+  color: #00ff2f;
+  font-size: 0.95rem;
+  letter-spacing: 3px;
+  margin-bottom: 12px;
+}
+
+h2 {
+  color: #444;
+  font-size: 0.75rem;
+  letter-spacing: 2px;
+  margin-bottom: 10px;
+}
+
+a, a:visited { color: #00ff41; text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ── Navigation bar ──────────────────────────────────────────────────────── */
+#nav {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  margin-bottom: 16px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #1a1a1a;
+}
+
+#nav .nav-brand {
+  color: #00ff2f;
+  font-size: 0.85rem;
+  letter-spacing: 3px;
+  font-weight: bold;
+}
+
+#nav .nav-link {
+  color: #444;
+  font-size: 0.68rem;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  padding: 3px 6px;
+  border-radius: 3px;
+}
+#nav .nav-link.active { color: #00ff41; border: 1px solid #1a3a1a; }
+#nav .nav-link:hover  { color: #00ff41; text-decoration: none; }
+
+#nav .ws-status {
+  margin-left: auto;
+  font-size: 0.62rem;
+  color: #282828;
+  letter-spacing: 1px;
+}
+#nav .ws-status.connected { color: #00ff41; }
+#nav .ws-status.error     { color: #ff3333; }
+
+/* ── Panel labels ────────────────────────────────────────────────────────── */
+.panel-label {
+  color: #3a3a3a;
+  font-size: 0.65rem;
+  letter-spacing: 2px;
+  margin: 8px 0 3px 0;
+}
+
+canvas {
+  display: block;
+  border: 1px solid #181818;
+  background: #020202;
+  image-rendering: pixelated;
+}
+
+/* ── Stats bar ───────────────────────────────────────────────────────────── */
+#stats {
+  margin-top: 8px;
+  font-size: 0.72rem;
+  color: #3a3a3a;
+  letter-spacing: 1px;
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+
+.stat-val  { color: #00ff41; }
+.stat-dn   { color: #ff6600; }
+.stat-ctrl { color: #00ccff; }
+.stat-ng   { color: #ff33cc; }
+.stat-inh  { color: #ff3333; }
+
+/* ── Controls panel ─────────────────────────────────────────────────────── */
+#controls {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 8px;
+}
+
+.ctrl-group {
+  background: #0a0a0a;
+  border: 1px solid #1a1a1a;
+  padding: 8px 10px;
+  border-radius: 4px;
+}
+
+.ctrl-group .ctrl-title {
+  color: #444;
+  font-size: 0.6rem;
+  letter-spacing: 2px;
+  margin-bottom: 6px;
+  text-transform: uppercase;
+}
+
+.ctrl-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.ctrl-row label {
+  color: #555;
+  font-size: 0.65rem;
+  min-width: 100px;
+}
+
+.ctrl-row input[type=range] {
+  width: 120px;
+  accent-color: #ff6600;
+}
+
+.ctrl-row .ctrl-val {
+  color: #00ff41;
+  font-size: 0.65rem;
+  min-width: 50px;
+}
+
+.ctrl-row select {
+  background: #111;
+  color: #00ff41;
+  border: 1px solid #333;
+  font-family: 'Courier New', monospace;
+  font-size: 0.65rem;
+  padding: 2px 4px;
+}
+
+/* ── Network viz ─────────────────────────────────────────────────────────── */
+#network-panel { margin-top: 12px; }
+#network_cv { border-radius: 4px; }
+
+/* ── Two-column monitor layout ───────────────────────────────────────────── */
+.main-layout {
+  display: flex;
+  gap: 16px;
+}
+
+.signal-col {
+  flex: 1;
+  min-width: 0;
+}
+
+.network-col {
+  width: 360px;
+  flex-shrink: 0;
+}
+
+/* ── Source launcher ─────────────────────────────────────────────────────── */
+#launcher {
+  background: #0a0a0a;
+  border: 1px solid #1a1a1a;
+  border-radius: 4px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.launcher-mode {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 90px;
+}
+.mode-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: #333;
+}
+.mode-dot.active   { background: #00ff41; }
+.mode-dot.error    { background: #ff3333; }
+.mode-dot.starting { background: #ff6600; animation: pulse 1s infinite; }
+@keyframes pulse { 50% { opacity: 0.3; } }
+.mode-label {
+  color: #555;
+  font-size: 0.65rem;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+.launcher-sep { width: 1px; height: 24px; background: #222; }
+
+#launcher input[type=text] {
+  background: #111; color: #00ff41; border: 1px solid #333;
+  font-family: 'Courier New', monospace; font-size: 0.65rem;
+  padding: 4px 8px; width: 300px; border-radius: 3px;
+}
+#launcher input[type=text]::placeholder { color: #333; }
+#launcher input[type=number] {
+  background: #111; color: #00ff41; border: 1px solid #333;
+  font-family: 'Courier New', monospace; font-size: 0.65rem;
+  padding: 4px 4px; width: 54px; border-radius: 3px;
+}
+#launcher button {
+  background: #1a1a1a; color: #00ff41; border: 1px solid #333;
+  font-family: 'Courier New', monospace; font-size: 0.65rem;
+  padding: 4px 10px; cursor: pointer; border-radius: 3px; letter-spacing: 1px;
+}
+#launcher button:hover  { background: #252525; border-color: #00ff41; }
+#launcher button:active { background: #00ff41; color: #0d0d0d; }
+#launcher label { color: #444; font-size: 0.6rem; }
+#launcher_msg   { color: #ff6600; font-size: 0.6rem; width: 100%; min-height: 14px; }
+
+/* ── Channel cards strip ─────────────────────────────────────────────────── */
+#channel-strip {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.ch-card {
+  background: #0a0a0a;
+  border: 1px solid #1a1a1a;
+  border-radius: 4px;
+  padding: 6px 10px;
+  cursor: pointer;
+  min-width: 120px;
+  flex-shrink: 0;
+  transition: border-color 0.15s;
+}
+.ch-card:hover     { border-color: #333; }
+.ch-card.selected  { border-color: #00ff41; }
+
+.ch-card .ch-title {
+  color: #555; font-size: 0.6rem; letter-spacing: 1px;
+  margin-bottom: 4px;
+}
+.ch-card canvas    { width: 100%; height: 32px; }
+.ch-card .ch-stats { color: #3a3a3a; font-size: 0.58rem; margin-top: 3px; }
+.ch-card .ch-stat-dn   { color: #ff6600; }
+.ch-card .ch-stat-l1   { color: #00ff41; }
+
+/* ── Input config page ───────────────────────────────────────────────────── */
+.input-layout {
+  max-width: 700px;
+}
+
+.input-section {
+  background: #0a0a0a;
+  border: 1px solid #1a1a1a;
+  border-radius: 4px;
+  padding: 14px 18px;
+  margin-bottom: 12px;
+}
+
+.input-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.input-row label {
+  color: #555; font-size: 0.68rem; min-width: 150px;
+}
+
+.input-row input[type=text],
+.input-row input[type=number],
+.input-row select {
+  background: #111; color: #00ff41; border: 1px solid #333;
+  font-family: 'Courier New', monospace; font-size: 0.68rem;
+  padding: 4px 8px; border-radius: 3px;
+}
+.input-row input[type=number] { width: 80px; }
+.input-row input[type=text]   { flex: 1; }
+
+.input-row input[type=radio]  { accent-color: #00ff41; }
+
+.input-help { color: #333; font-size: 0.6rem; margin-top: 2px; }
+
+.source-section { display: none; }
+.source-section.active { display: block; }
+
+.btn-primary {
+  background: #1a3a1a; color: #00ff41; border: 1px solid #00ff41;
+  font-family: 'Courier New', monospace; font-size: 0.72rem;
+  padding: 6px 16px; cursor: pointer; border-radius: 3px; letter-spacing: 2px;
+}
+.btn-primary:hover  { background: #002800; }
+.btn-primary:active { background: #00ff41; color: #0d0d0d; }
+
+.error-msg { color: #ff3333; font-size: 0.65rem; margin-top: 3px; }

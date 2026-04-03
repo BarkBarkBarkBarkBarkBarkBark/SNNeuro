@@ -64,17 +64,23 @@ Everything runs at 20 kHz with results streaming live to your browser.
 
 ```bash
 # 1. Install — requires uv (https://docs.astral.sh/uv/)
-uv venv && uv pip install -e ".[all]"
+uv venv && source .venv/bin/activate
+uv pip install -e ".[all,web]"
 
-# 2. Start the agent
-snn-serve
+# 2. Start everything (pipeline server + browser dashboard)
+./start.sh                                              # synthetic mode, 1 channel
+./start.sh --channels 4 --config data/a_best_config.json
 
 # 3. Open your browser
-open http://localhost:8080
+#    http://<server-ip>:8000/
 ```
 
-From the browser GUI you can launch a **synthetic recording** or **load a
-`.ncs` file** directly — no extra terminal needed.
+`./start.sh` starts the SNN pipeline WebSocket server and the Django dashboard
+together.  From the browser you can launch a **synthetic recording** or
+**load a `.ncs` file** directly — no extra terminal needed.
+
+> **SSH / remote box?**  `start.sh` prints the exact LAN URL to copy into
+> your local browser when it starts.
 
 ### Remote UI (e.g. Jetson on the LAN)
 
@@ -105,7 +111,7 @@ synthetic and file modes live from the browser.
 
 | Mode | How to use |
 |---|---|
-| **Synthetic** | Click 🧪 SYNTHETIC in the browser (or `snn-serve --mode synthetic`) |
+| **Synthetic** | Click 🧪 SYNTHETIC in the browser dashboard (or `./start.sh --mode synthetic`) |
 | **File (.ncs)** | Enter a file path in the browser launcher and click ▶ LOAD FILE |
 | **LSL stream** | Start `snn-lsl data/raw/CSC285_0001.ncs` in a separate terminal, then `snn-serve` |
 | **Electrode (UDP)** | Feed real samples to UDP port 9001: `snn-serve --mode electrode` |
@@ -115,8 +121,10 @@ synthetic and file modes live from the browser.
 
 | Command | What it does |
 |---|---|
-| `snn-serve` | Start the agent server + browser GUI |
-| `snn-serve --mode synthetic` | Start with built-in synthetic signal |
+| `./start.sh` | **Start everything** — pipeline server + Django dashboard (browser UI on port 8000) |
+| `./start.sh --channels N` | Multi-channel mode (e.g. `--channels 4`) |
+| `./start.sh --config data/a_best_config.json` | Load saved hyperparameters |
+| `snn-serve` | Start pipeline WebSocket server only (no browser UI) |
 | `snn-lsl <ncs_path>` | Replay a `.ncs` file over Lab Streaming Layer |
 | `snn-test-electrode` | Synthetic UDP test signal generator |
 | `snn-evaluate` | Offline pipeline evaluation against ground truth |
@@ -124,9 +132,9 @@ synthetic and file modes live from the browser.
 | `snn-genetic` | Genetic crossover optimizer (Stage 2) |
 | `snn-ground-truth` | Generate synthetic ground-truth recording |
 
-## Browser GUI
+## Browser dashboard
 
-The live dashboard runs at `http://localhost:8080` and shows:
+The live dashboard runs at `http://<server-ip>:8000` and shows:
 
 - **Source launcher** — load files or start synthetic recordings without
   leaving the browser
@@ -247,8 +255,8 @@ snn-agent/
 │   │   ├── decoder.py              # Control decoder
 │   │   └── pipeline.py             # Factory: builds the full chain
 │   ├── server/
-│   │   ├── app.py                  # Async server — WebSocket + HTTP
-│   │   └── static/index.html       # Browser GUI
+│   │   ├── app.py                  # Async server — WebSocket + UDP only (no HTTP)
+│   │   └── static/index.html       # Legacy browser GUI (archived)
 │   ├── eval/
 │   │   ├── evaluate.py             # Offline scorer (SpikeInterface)
 │   │   ├── optimize.py             # Optuna TPE hyperparameter search

@@ -1,0 +1,23 @@
+{% load static %}<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{% block title %}SNN Agent{% endblock %}</title>
+<link rel="stylesheet" href="{% static 'dashboard/css/snn.css' %}">
+{% block extra_head %}{% endblock %}
+</head>
+<body>
+
+<nav id="nav">
+  <span class="nav-brand">⚡ SNN AGENT</span>
+  <a href="{% url 'input' %}"   class="nav-link {% if request.resolver_match.url_name == 'input'   %}active{% endif %}">INPUT</a>
+  <a href="{% url 'monitor' %}" class="nav-link {% if request.resolver_match.url_name == 'monitor' %}active{% endif %}">MONITOR</a>
+  <span id="ws-status-nav" class="ws-status">● pipeline: —</span>
+</nav>
+
+{% block content %}{% endblock %}
+
+{% block extra_scripts %}{% endblock %}
+</body>
+</html>

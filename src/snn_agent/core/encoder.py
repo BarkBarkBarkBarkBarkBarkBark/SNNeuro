@@ -85,28 +85,6 @@ class SpikeEncoder:
             else:
                 return np.zeros(0, dtype=bool)
 
-<<<<<<< HEAD
-        # ── Circular buffer write (O(1) — no array copy) ─────────────
-        ring = self._ring
-        nc = self.n_centers
-        head = self._ring_head
-
-        # Activate amplitude bins: vectorised |centres − sample| ≤ dvm
-        active = np.abs(self.centers - sample) <= self.dvm
-
-        # Write activated bins at head position in the ring
-        ring[head:head + nc] = active
-        # Advance head (mod ring length)
-        self._ring_head = (head + nc) % self._ring_len
-
-        # ── Read subsampled delay taps via pre-built index array ──────
-        # _read_indices is shape [n_afferents] and contains the ring
-        # positions to read (offset by current head), built once at
-        # calibration time.  We add the current head and wrap.
-        idx = (self._read_indices + self._ring_head) % self._ring_len
-        np.take(ring, idx, out=self._out_buf)
-        return self._out_buf
-=======
         # In-place amplitude bin activation — zero heap allocations
         np.subtract(self.centers, sample, out=self._abs_diff)
         np.abs(self._abs_diff, out=self._abs_diff)
@@ -123,7 +101,6 @@ class SpikeEncoder:
         # For step_size==1: _aff_out IS reg.ravel() — already up to date (zero-copy)
 
         return self._aff_out  # persistent view — no allocation, no copy
->>>>>>> 316d4a9 (running fast parallel, still low observability and no output from the final layer)
 
     @property
     def is_calibrated(self) -> bool:

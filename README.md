@@ -135,14 +135,9 @@ synthetic and file modes live from the browser.
 |---|---|
 | **Synthetic** | Click 🧪 SYNTHETIC in the browser dashboard (or `./start.sh --mode synthetic`) |
 | **File (.ncs)** | Enter a file path in the browser launcher and click ▶ LOAD FILE |
-<<<<<<< HEAD
-| **LSL stream** | Start `snn-lsl data/raw/CSC285_0001.ncs` in a separate terminal, then `./start.sh --mode lsl` |
-| **Electrode (UDP)** | Feed real samples to UDP port 9001: `./start.sh --mode electrode` |
-=======
 | **LSL stream** | Start `snn-lsl data/raw/CSC285_0001.ncs` in a separate terminal, then `snn-serve` |
 | **Electrode (UDP)** | Feed real samples to UDP port 9001: `snn-serve --mode electrode` |
 | **Multi-Channel** | Run 8 channel: `snn-serve --mode synthetic --channels 8 --device cuda` |
->>>>>>> 316d4a9 (running fast parallel, still low observability and no output from the final layer)
 
 ### CLI commands
 

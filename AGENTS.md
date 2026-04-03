@@ -103,7 +103,6 @@ raw electrode signal (80 kHz UDP / LSL / synthetic)
 | `docs/manifesto.json` | Machine-readable project contract | — | I/O protocols, file roles, extension points. |
 | `data/best_config.json` | Current best hyperparameters | — | Updated by optimizer runs. Contains params, score, and all metrics. |
 
-<<<<<<< HEAD
 ### Django Web UI (multi-page dashboard)
 
 | File | Purpose | Agent Notes |
@@ -134,7 +133,7 @@ raw electrode signal (80 kHz UDP / LSL / synthetic)
 | `dashboard/templates/dashboard/monitor.html` | Live monitor page | ES module imports, `NUM_CHANNELS` from Django context. |
 | `dashboard/templates/dashboard/partials/` | Template partials | `_launcher`, `_waveform`, `_stats_bar`, `_network_viz`, `_controls`. |
 | `dashboard/management/commands/run_all.py` | `manage.py run_all` command | Starts both servers as subprocesses; handles Ctrl+C cleanup. |
-=======
+
 ## Remote / embedded (Jetson)
 
 - Browser: open `http://<host>:8080`; WS uses the page host (not hard-coded
@@ -143,7 +142,6 @@ raw electrode signal (80 kHz UDP / LSL / synthetic)
   uses vectorized `sosfilt` across channels in `ChannelBank.step_preprocess_chunk`.
 - DEC path: `BatchedDECLayer` keeps delay state on GPU; avoid per-step full
   `l1.cpu().numpy()` except where the CPU decoder needs NumPy.
->>>>>>> 316d4a9 (running fast parallel, still low observability and no output from the final layer)
 
 ## Key Conventions for Agents
 

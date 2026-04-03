@@ -29,6 +29,10 @@ import snntorch as snn
 
 from snn_agent.config import Config
 
+# Pin PyTorch to 1 thread — our matmuls are tiny (e.g. 2270×110);
+# OpenMP thread-pool overhead far exceeds the compute savings.
+torch.set_num_threads(1)
+
 __all__ = ["TemplateLayer"]
 
 

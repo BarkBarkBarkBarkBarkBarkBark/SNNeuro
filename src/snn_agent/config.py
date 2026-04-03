@@ -166,6 +166,26 @@ class ConvergenceConfig:
     freeze_stdp: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class ConvergenceConfig:
+    """Cross-channel convergence: per-probe (local) then global ensemble states."""
+    enabled: bool = True
+    n_local_neurons: int = 16
+    n_global_neurons: int = 32
+    tm_samples: int = 15
+    refractory_samples: int = 6
+    threshold_factor: float = 0.3
+    wi_factor: float = 6.0
+    init_w_min: float = 0.2
+    init_w_max: float = 0.7
+    w_lo: float = 0.0
+    w_hi: float = 1.0
+    stdp_ltp: float = 0.01
+    stdp_ltp_window: int = 8
+    stdp_ltd: float = -0.005
+    freeze_stdp: bool = False
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Top-level config
 # ─────────────────────────────────────────────────────────────────────────────

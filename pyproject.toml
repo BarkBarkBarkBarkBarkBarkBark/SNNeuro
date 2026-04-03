@@ -21,8 +21,12 @@ dependencies = [
     "snntorch>=0.7",
     "websockets>=10",
     "pyyaml>=6.0",
+<<<<<<< HEAD
     "numba>=0.58",
     "orjson>=3.9",
+=======
+    "numba>=0.59",
+>>>>>>> 316d4a9 (running fast parallel, still low observability and no output from the final layer)
 ]
 
 [project.optional-dependencies]

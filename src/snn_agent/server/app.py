@@ -35,6 +35,10 @@ import subprocess
 import time
 from pathlib import Path
 
+# Prevent PyTorch/OpenMP from spawning threads for tiny matmuls.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+
 import numpy as np
 import websockets
 

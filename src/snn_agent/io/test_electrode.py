@@ -100,17 +100,16 @@ def main() -> None:
     signal = generate_signal(args.duration, args.snr, templates)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-    print(f"\n🔬 Electrode Test Sender")
+    print("\n🔬 Electrode Test Sender")
     print(f"   Signal      →  {args.duration}s @ {SR} Hz  ({len(signal)} samples)")
     print(f"   Templates   →  {args.templates} waveform shapes, SNR={args.snr}")
     print(f"   Sending to  →  {HOST}:{PORT}")
     print(f"   Listening   →  control output on port {CTRL_PORT}")
-    print(f"   Press Ctrl+C to stop\n")
+    print("   Press Ctrl+C to stop\n")
 
     threading.Thread(target=_listen_control, daemon=True).start()
 
     batch_size = 80
-    batch_delay = batch_size / SR
     i = 0
     t_start = time.perf_counter()
 

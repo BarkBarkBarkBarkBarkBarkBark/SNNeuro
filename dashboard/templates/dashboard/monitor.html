@@ -25,14 +25,14 @@
 
 {% block extra_scripts %}
 <script type="module">
-import { connect, sendCmd, sendRaw, onMessage } from "{% static 'dashboard/js/websocket.js' %}?v=2";
-import { init as wfInit, push as wfPush, setTimeWindow, setChannel as wfSetCh } from "{% static 'dashboard/js/waveform.js' %}?v=2";
-import { init as rastInit, push as rastPush, setTimeWindow as rastSetTW, setChannel as rastSetCh } from "{% static 'dashboard/js/raster.js' %}?v=2";
-import { init as netInit, update as netUpdate, setChannel as netSetCh } from "{% static 'dashboard/js/network_viz.js' %}?v=2";
-import { init as ctrlInit, initDNThreshold, getTimeWindowMs } from "{% static 'dashboard/js/controls.js' %}?v=2";
-import { update as statsUpdate, setChannel as statsSetCh } from "{% static 'dashboard/js/stats.js' %}?v=2";
-import { init as launcherInit, handleStatus } from "{% static 'dashboard/js/launcher.js' %}?v=2";
-import { init as chInit, update as chUpdate, getNumChannels, preCreateChannels } from "{% static 'dashboard/js/channels.js' %}?v=2";
+import { connect, sendCmd, sendRaw, onMessage } from "{% static 'dashboard/js/websocket.js' %}?v=3";
+import { init as wfInit, push as wfPush, setTimeWindow, setChannel as wfSetCh } from "{% static 'dashboard/js/waveform.js' %}?v=3";
+import { init as rastInit, push as rastPush, setTimeWindow as rastSetTW, setChannel as rastSetCh } from "{% static 'dashboard/js/raster.js' %}?v=3";
+import { init as netInit, update as netUpdate, setChannel as netSetCh } from "{% static 'dashboard/js/network_viz.js' %}?v=3";
+import { init as ctrlInit, initDNThreshold, getTimeWindowMs } from "{% static 'dashboard/js/controls.js' %}?v=3";
+import { update as statsUpdate, setChannel as statsSetCh } from "{% static 'dashboard/js/stats.js' %}?v=3";
+import { init as launcherInit, handleStatus } from "{% static 'dashboard/js/launcher.js' %}?v=3";
+import { init as chInit, update as chUpdate, getNumChannels, preCreateChannels } from "{% static 'dashboard/js/channels.js' %}?v=3";
 
 const NUM_CHANNELS = {{ num_channels|default:'1' }};
 
@@ -46,6 +46,7 @@ launcherInit(sendRaw, getNumChannels);
 // Always init channel system — cards auto-appear as data arrives,
 // strip auto-shows when more than 1 channel is detected.
 chInit(ch => {
+  sendCmd('select_channel', ch);
   wfSetCh(ch); rastSetCh(ch); netSetCh(ch); statsSetCh(ch);
 });
 // Pre-create channel cards if we know the count from Django context

@@ -442,7 +442,6 @@ def warmup_kernels(C: int = 2, A: int = 8, L: int = 16, N: int = 2) -> None:
     )
 
     # Encoder kernel
-    nc_arr = np.array([A], dtype=np.int64)
     centers_w = np.zeros((C, A), dtype=np.float64)
     dvm_w = np.ones(C, dtype=np.float64)
     sreg_w = np.zeros((C, A, 4), dtype=bool)  # reg_width=4, step_size=1, twindow=4

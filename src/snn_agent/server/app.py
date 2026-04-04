@@ -26,6 +26,7 @@ Services:
 from __future__ import annotations
 
 import asyncio
+import http.server
 import json
 import os
 import re
@@ -35,6 +36,7 @@ import socket
 import struct
 import subprocess
 import time
+from contextlib import suppress
 from pathlib import Path
 
 # Prevent PyTorch/OpenMP from spawning threads for tiny matmuls.
@@ -43,24 +45,63 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 
 import numpy as np
 import torch
-import torch
 import websockets
 
 # Fast JSON serialisation (orjson is ~5× faster than stdlib json)
 try:
     import orjson
     def _json_dumps(obj: dict) -> str:
-        return orjson.dumps(obj).decode("utf-8")
+        return orjson.dumps(obj, option=orjson.OPT_SERIALIZE_NUMPY).decode("utf-8")
 except ImportError:
     def _json_dumps(obj: dict) -> str:  # type: ignore[misc]
         return json.dumps(obj)
 
 from snn_agent.config import Config, DEFAULT_CONFIG
 from snn_agent.core.pipeline import build_pipeline, complete_pipeline, build_multichannel
+from snn_agent.core.template import TemplateLayer
 
 # ── Shared state ──────────────────────────────────────────────────────────────
 ws_clients: set = set()
 pipeline_refs: dict = {}
+
+# ── Broadcast queue + perf stats ─────────────────────────────────────────────
+_broadcast_queue: asyncio.Queue[tuple[str, float]] | None = None
+_BROADCAST_QUEUE_MAXSIZE = 512
+
+_perf_stats: dict[str, float] = {
+    "block_count": 0,
+    "last_block_compute_ms": 0.0,
+    "avg_block_compute_ms": 0.0,
+    "last_queue_lag_ms": 0.0,
+    "avg_queue_lag_ms": 0.0,
+}
+
+
+def _ensure_broadcast_queue() -> None:
+    global _broadcast_queue
+    if _broadcast_queue is None:
+        _broadcast_queue = asyncio.Queue(maxsize=_BROADCAST_QUEUE_MAXSIZE)
+
+
+async def _broadcast_worker() -> None:
+    """Drain the broadcast queue and fan out messages to WS clients."""
+    _ensure_broadcast_queue()
+    q = _broadcast_queue
+    assert q is not None
+    while True:
+        msg, enq_t = await q.get()
+        lag_ms = (time.perf_counter() - enq_t) * 1000.0
+        _perf_stats["last_queue_lag_ms"] = lag_ms
+        _perf_stats["avg_queue_lag_ms"] = 0.95 * _perf_stats["avg_queue_lag_ms"] + 0.05 * lag_ms
+
+        dead: list = []
+        for ws in list(ws_clients):
+            try:
+                await ws.send(msg)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            ws_clients.discard(ws)
 
 # ── Spike histogram helper ───────────────────────────────────────────────────
 _SPK_HIST_BINS = 16
@@ -154,8 +195,6 @@ def _free_port(port: int) -> None:
         time.sleep(0.15)
 
 
-<<<<<<< HEAD
-=======
 # ── HTTP static server ───────────────────────────────────────────────────────
 class _StaticHandler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *a, **kw):
@@ -176,7 +215,6 @@ def _run_http(port: int) -> None:
     except OSError as exc:
         print(f"⚠  HTTP server on :{port} failed ({exc}) — use a free port or stop the other process")
 
->>>>>>> 316d4a9 (running fast parallel, still low observability and no output from the final layer)
 
 # ── UDP receiver ──────────────────────────────────────────────────────────────
 class UDPReceiver(asyncio.DatagramProtocol):
@@ -408,6 +446,11 @@ async def _broadcast(msg: str) -> None:
         pass
 
 
+# ── Synthetic batching constants ─────────────────────────────────────────────
+RAW_BLOCK_SIZE = 1024
+CUDA_BATCH_CHANNEL_THRESHOLD = 4
+
+
 def _record_block_compute(elapsed_ms: float) -> None:
     _perf_stats["block_count"] += 1
     _perf_stats["last_block_compute_ms"] = elapsed_ms
@@ -424,20 +467,34 @@ async def _process_stream(
     channel_idx: int = 0,
     pace_realtime: bool = False,
     pace_fs: float | None = None,
+    gt_spike_trains: dict | None = None,
+    gt_spike_trains_per_ch: list | None = None,
 ):
-    # Always use the GPU-batched multi-channel path (works for C=1 too)
-    await _process_stream_multi(
-        cfg, sample_source,
-        pace_realtime=pace_realtime,
-        pace_fs=pace_fs,
-        gt_spike_trains=gt_spike_trains,
-    )
+    if cfg.n_channels > 1:
+        await _process_stream_multi(
+            cfg,
+            sample_source,
+            pace_realtime=pace_realtime,
+            pace_fs=pace_fs,
+            gt_spike_trains=gt_spike_trains,
+            gt_spike_trains_per_ch=gt_spike_trains_per_ch,
+        )
+    else:
+        await _process_stream_single(
+            cfg,
+            sample_source,
+            channel_idx=channel_idx,
+            pace_realtime=pace_realtime,
+            pace_fs=pace_fs,
+            gt_spike_trains=gt_spike_trains,
+        )
 
 
 async def _process_stream_single(
     cfg: Config,
     sample_source,
     *,
+    channel_idx: int = 0,
     pace_realtime: bool = False,
     pace_fs: float | None = None,
     gt_spike_trains: dict | None = None,
@@ -521,12 +578,8 @@ async def _process_stream_single(
                         "t": step_count, "samples": list(sample_buf),
                         "dn_flags": list(dn_buf), "spikes": [],
                         "control": 0, "confidence": 0,
-<<<<<<< HEAD
-                        "channel": channel_idx,
-=======
                         "effective_fs": preproc.effective_fs,
                         "n_channels": 1,
->>>>>>> 316d4a9 (running fast parallel, still low observability and no output from the final layer)
                     }))
                     sample_buf.clear()
                     dn_buf.clear()
@@ -630,16 +683,11 @@ async def _process_stream_single(
                 )
 
             if step_count % broadcast_every == 0 and sample_buf:
-<<<<<<< HEAD
-                # Capture membrane state only at broadcast time (not every step)
-                l1_membrane_snapshot = pipeline_obj.template.mem.detach().numpy()
-=======
                 _hex_sc = (
                     int(pipeline_obj.dec_layer.hex_output)
                     if pipeline_obj and pipeline_obj.dec_layer is not None
                     else 0
                 )
->>>>>>> 316d4a9 (running fast parallel, still low observability and no output from the final layer)
                 broadcast_msg = {
                     "t": step_count,
                     "channel": channel_idx,
@@ -655,14 +703,10 @@ async def _process_stream_single(
                     ),
                     "noise_gate": round(last_noise_gate, 4),
                     "inhibition_active": last_inhibition,
-<<<<<<< HEAD
-                    "l1_membrane": np.round(l1_membrane_snapshot, 2).tolist(),
-=======
                     "effective_fs": preproc.effective_fs,
                     "n_channels": 1,
                     "dn_open_selected": bool(dn_buf[-1]) if dn_buf else False,
                     "dec_gate_active": bool(_hex_sc > 0),
->>>>>>> 316d4a9 (running fast parallel, still low observability and no output from the final layer)
                 }
                 if pipeline_refs.get("network_visible", True):
                     broadcast_msg["l1_membrane"] = [round(v, 2) for v in l1_membrane_snapshot]
@@ -677,13 +721,10 @@ async def _process_stream_single(
                 l1_spike_set.clear()
                 dec_spike_set.clear()
 
-<<<<<<< HEAD
-=======
         # Yield periodically
         if step_count % 20 == 0:
             await asyncio.sleep(0)
 
->>>>>>> 316d4a9 (running fast parallel, still low observability and no output from the final layer)
     elapsed_total = time.perf_counter() - t0
     print(
         f"\n   🏁 Finished: {step_count} processed samples "
@@ -883,6 +924,7 @@ async def _process_stream_multi(
     pace_realtime: bool = False,
     pace_fs: float | None = None,
     gt_spike_trains: dict | None = None,
+    gt_spike_trains_per_ch: list | None = None,
 ):
     """
     Multi-channel streaming pipeline using ChannelBank + batched GPU layers.
@@ -914,20 +956,27 @@ async def _process_stream_multi(
     convergence_snapshot: list[float] = []
     probe_convergence_snapshot: list[list[float]] = []
 
-    # ── Live accuracy tracking (multichannel synthetic GT) ─────────────
-    _mc_has_gt = gt_spike_trains is not None
+    # ── Live per-channel accuracy tracking (multichannel synthetic GT) ──
+    _mc_has_gt = gt_spike_trains_per_ch is not None
     _mc_native_fs = pace_fs or float(cfg.sampling_rate_hz)
     _mc_delta_samp = int(2.0 * 1e-3 * _mc_native_fs)
     _mc_det_debounce = int(1.0 * 1e-3 * _mc_native_fs)
-    _mc_all_gt: np.ndarray = np.empty(0, dtype=np.int64)
-    if _mc_has_gt:
-        _mc_all_gt = np.sort(np.concatenate(list(gt_spike_trains.values())))
-    # Mutable state dict — mutated inside _process_one closure without nonlocal
-    _mc_st = {
-        'tp': 0, 'fp': 0, 'fn': 0,
-        'gt_ptr': 0, 'last_det': -99999, 'frame': 0,
-        'latencies': [], 'matched': set(),
-    }
+    # One sorted spike-sample array per channel
+    _mc_all_gt_per_ch: list[np.ndarray] = [np.empty(0, dtype=np.int64)] * C
+    if _mc_has_gt and gt_spike_trains_per_ch:
+        for _ci, _ch_gt in enumerate(gt_spike_trains_per_ch):
+            if _ch_gt is not None and _ci < C:
+                _mc_all_gt_per_ch[_ci] = _ch_gt
+    # Per-channel mutable accuracy state (mutated inside _process_one closure)
+    _mc_st_per_ch = [
+        {
+            'tp': 0, 'fp': 0, 'fn': 0,
+            'gt_ptr': 0, 'last_det': -99999,
+            'latencies': [], 'matched': set(),
+        }
+        for _ in range(C)
+    ]
+    _mc_frame = [0]  # shared frame counter (list allows mutation without nonlocal)
 
     # Chunk accumulator for batched preprocessing
     raw_chunk = np.zeros((chunk_size, C), dtype=np.float64)
@@ -998,38 +1047,43 @@ async def _process_stream_multi(
                 if dec_cpu is not None:
                     dec_spike_sets[ch].update(np.flatnonzero(dec_cpu[ch]).tolist())
 
-            # ── Live accuracy: match any-channel L1 fire to merged GT ──
-            _mc_st['frame'] += 1
+            # ── Live per-channel accuracy: match each channel's L1 fires ──
+            _mc_frame[0] += 1
             if _mc_has_gt:
-                _fi = _mc_st['frame']
-                # Expire old GT spikes as FN
-                while (_mc_st['gt_ptr'] < len(_mc_all_gt) and
-                       _mc_all_gt[_mc_st['gt_ptr']] < _fi - _mc_delta_samp):
-                    if _mc_st['gt_ptr'] not in _mc_st['matched']:
-                        _mc_st['fn'] += 1
-                    _mc_st['gt_ptr'] += 1
-                # Any channel fired L1?
-                any_ch_fired = bool(np.any(l1_cpu))
-                if any_ch_fired and _fi - _mc_st['last_det'] > _mc_det_debounce:
-                    _mc_st['last_det'] = _fi
-                    best_dist = float('inf')
-                    best_gi = -1
-                    for gi in range(_mc_st['gt_ptr'], len(_mc_all_gt)):
-                        gt_t = int(_mc_all_gt[gi])
-                        if gt_t > _fi + _mc_delta_samp:
-                            break
-                        if gi in _mc_st['matched']:
-                            continue
-                        dist = abs(_fi - gt_t)
-                        if dist <= _mc_delta_samp and dist < best_dist:
-                            best_dist = dist
-                            best_gi = gi
-                    if best_gi >= 0:
-                        _mc_st['tp'] += 1
-                        _mc_st['matched'].add(best_gi)
-                        _mc_st['latencies'].append(best_dist)
-                    else:
-                        _mc_st['fp'] += 1
+                _fi = _mc_frame[0]
+                for _ch in range(C):
+                    _mc_st_ch = _mc_st_per_ch[_ch]
+                    _mc_gt_ch = _mc_all_gt_per_ch[_ch]
+                    if len(_mc_gt_ch) == 0:
+                        continue
+                    # Expire old GT spikes as FN
+                    while (_mc_st_ch['gt_ptr'] < len(_mc_gt_ch) and
+                           _mc_gt_ch[_mc_st_ch['gt_ptr']] < _fi - _mc_delta_samp):
+                        if _mc_st_ch['gt_ptr'] not in _mc_st_ch['matched']:
+                            _mc_st_ch['fn'] += 1
+                        _mc_st_ch['gt_ptr'] += 1
+                    # Did this channel fire L1?
+                    ch_fired = bool(np.any(l1_cpu[_ch]))
+                    if ch_fired and _fi - _mc_st_ch['last_det'] > _mc_det_debounce:
+                        _mc_st_ch['last_det'] = _fi
+                        best_dist = float('inf')
+                        best_gi = -1
+                        for gi in range(_mc_st_ch['gt_ptr'], len(_mc_gt_ch)):
+                            gt_t = int(_mc_gt_ch[gi])
+                            if gt_t > _fi + _mc_delta_samp:
+                                break
+                            if gi in _mc_st_ch['matched']:
+                                continue
+                            dist = abs(_fi - gt_t)
+                            if dist <= _mc_delta_samp and dist < best_dist:
+                                best_dist = dist
+                                best_gi = gi
+                        if best_gi >= 0:
+                            _mc_st_ch['tp'] += 1
+                            _mc_st_ch['matched'].add(best_gi)
+                            _mc_st_ch['latencies'].append(best_dist)
+                        else:
+                            _mc_st_ch['fp'] += 1
 
             if "convergence_spikes" in result and result["convergence_spikes"] is not None:
                 convergence_snapshot = [
@@ -1055,86 +1109,94 @@ async def _process_stream_multi(
                 )
 
             if sc_i % broadcast_stride == 0 and sample_buf[sc]:
-                _n_l1 = cfg.l1.n_neurons
-                ch_summary = []
-                for ch in range(C):
-                    ch_summary.append({
-                        "ch": ch,
-                        "dn": bool(dn_spikes[ch]),
-                        "n_spikes": len(l1_spike_sets[ch]),
-                        "control": round(float(last_controls[ch]), 4),
-                        "dec_hex": f"0x{int(hex_outputs[ch]):04X}",
-                        "spk_hist": _spike_hist(l1_spike_sets[ch], _n_l1),
-                        "samples": sample_buf[ch][-30:],
-                    })
                 ps = max(1, int(cfg.probe_size))
-                n_probes_mc = (C + ps - 1) // ps
                 cc = cfg.convergence
                 viz_detail = pipeline_refs.get("viz_detail", True)
-                dec_active_sel = (
-                    bank.dec_layer is not None and int(hex_outputs[sc]) != 0
-                )
-                broadcast_msg = {
+                common = {
                     "t": sc_i,
                     "selected_ch": sc,
                     "n_channels": C,
                     "effective_fs": bank.preprocessors[0].effective_fs,
                     "probe_size": ps,
-                    "n_probes": n_probes_mc,
+                    "n_probes": (C + ps - 1) // ps,
                     "n_local_neurons": cc.n_local_neurons,
                     "n_global_neurons": cc.n_global_neurons,
                     "viz_detail": viz_detail,
-                    "samples": list(sample_buf[sc]),
-                    "dn_flags": list(dn_buf[sc]),
-                    "spikes": sorted(l1_spike_sets[sc]),
-                    "control": round(float(last_controls[sc]), 4),
-                    "confidence": round(float(last_confidences[sc]), 4),
-                    "dn_th": round(bank.batched_attention.threshold, 2) if bank.batched_attention is not None else 0,
-                    "noise_gate": round(float(last_noise_gates[sc]), 4),
-                    "inhibition_active": bool(last_inhibitions[sc]),
-                    "channels": ch_summary,
-                    "dn_open_selected": bool(dn_spikes[sc]),
-                    "dec_gate_active": dec_active_sel,
-                    "dec_unit_threshold": round(bank.dec_layer.unit_threshold, 2) if bank.dec_layer is not None else 16.5,
-                    "dec_dn_window_ms": round(bank.dec_layer._dn_window_samples / bank.preprocessors[0].effective_fs * 1000, 2) if bank.dec_layer is not None else 5.0,
+                    "dn_th": round(bank.batched_attention.threshold, 2)
+                    if bank.batched_attention is not None
+                    else 0,
                     "n_l1": cfg.l1.n_neurons,
                 }
-                if viz_detail and pipeline_refs.get("network_visible", True) and bank.template:
-                    _mem_row = bank.template.mem[sc].detach().cpu()
-                    broadcast_msg["l1_membrane"] = [
-                        round(float(v), 2) for v in _mem_row.tolist()
-                    ]
-                if bank.dec_layer is not None:
-                    broadcast_msg["dec_spikes"] = (
-                        sorted(dec_spike_sets[sc]) if viz_detail else []
-                    )
-                    broadcast_msg["dec_hex"] = f"0x{int(hex_outputs[sc]):04X}"
-                if viz_detail and convergence_snapshot:
-                    broadcast_msg["convergence"] = [
-                        round(v, 3) for v in convergence_snapshot
-                    ]
-                    broadcast_msg["global_convergence"] = [
-                        round(v, 3) for v in convergence_snapshot
-                    ]
-                if viz_detail and probe_convergence_snapshot:
-                    broadcast_msg["probe_convergence"] = [
-                        [round(v, 3) for v in row] for row in probe_convergence_snapshot
-                    ]
-                if _mc_has_gt and (_mc_st['tp'] + _mc_st['fp'] + _mc_st['fn']) > 0:
-                    _p = _mc_st['tp'] / (_mc_st['tp'] + _mc_st['fp']) if (_mc_st['tp'] + _mc_st['fp']) > 0 else 0.0
-                    _r = _mc_st['tp'] / (_mc_st['tp'] + _mc_st['fn']) if (_mc_st['tp'] + _mc_st['fn']) > 0 else 0.0
-                    _fh = (1.25 * _p * _r) / (0.25 * _p + _r) if (_p + _r) > 0 else 0.0
-                    _lat = (np.mean(_mc_st['latencies']) / _mc_native_fs * 1000) if _mc_st['latencies'] else 0.0
-                    broadcast_msg["accuracy"] = {
-                        "precision": round(_p, 4),
-                        "recall":    round(_r, 4),
-                        "f_half":    round(_fh, 4),
-                        "tp": _mc_st['tp'], "fp": _mc_st['fp'], "fn": _mc_st['fn'],
-                        "latency_ms": round(_lat, 2),
-                        "n_gt": len(_mc_all_gt),
-                        "gt_progress": round(_mc_st['gt_ptr'] / len(_mc_all_gt), 4) if len(_mc_all_gt) > 0 else 0,
+
+                # Emit per-channel messages so the dashboard can demux properly.
+                # (The UI assumes each WS message belongs to exactly one channel.)
+                for ch in range(C):
+                    msg = {
+                        **common,
+                        "channel": ch,
+                        "samples": list(sample_buf[ch]),
+                        "dn_flags": list(dn_buf[ch]),
+                        "spikes": sorted(l1_spike_sets[ch]),
+                        "control": round(float(last_controls[ch]), 4),
+                        "confidence": round(float(last_confidences[ch]), 4),
+                        "noise_gate": round(float(last_noise_gates[ch]), 4),
+                        "inhibition_active": bool(last_inhibitions[ch]),
+                        "dn_open_selected": bool(dn_spikes[ch]),
                     }
-                await _broadcast(json.dumps(broadcast_msg))
+
+                    if bank.dec_layer is not None:
+                        msg["dec_gate_active"] = bool(int(hex_outputs[ch]) != 0)
+                        msg["dec_unit_threshold"] = round(bank.dec_layer.unit_threshold, 2)
+                        msg["dec_dn_window_ms"] = round(
+                            bank.dec_layer._dn_window_samples
+                            / bank.preprocessors[0].effective_fs
+                            * 1000,
+                            2,
+                        )
+                        msg["dec_hex"] = f"0x{int(hex_outputs[ch]):04X}"
+                        msg["dec_spikes"] = sorted(dec_spike_sets[ch]) if viz_detail else []
+                    else:
+                        msg["dec_gate_active"] = False
+
+                    if _mc_has_gt:
+                        _mc_st_ch = _mc_st_per_ch[ch]
+                        _mc_gt_ch = _mc_all_gt_per_ch[ch]
+                        _tot_ch = _mc_st_ch['tp'] + _mc_st_ch['fp'] + _mc_st_ch['fn']
+                        if _tot_ch > 0:
+                            _p_ch = (_mc_st_ch['tp'] / (_mc_st_ch['tp'] + _mc_st_ch['fp'])
+                                     if (_mc_st_ch['tp'] + _mc_st_ch['fp']) > 0 else 0.0)
+                            _r_ch = (_mc_st_ch['tp'] / (_mc_st_ch['tp'] + _mc_st_ch['fn'])
+                                     if (_mc_st_ch['tp'] + _mc_st_ch['fn']) > 0 else 0.0)
+                            _fh_ch = ((1.25 * _p_ch * _r_ch) / (0.25 * _p_ch + _r_ch)
+                                      if (_p_ch + _r_ch) > 0 else 0.0)
+                            _lat_ch = ((np.mean(_mc_st_ch['latencies']) / _mc_native_fs * 1000)
+                                       if _mc_st_ch['latencies'] else 0.0)
+                            _n_gt_ch = len(_mc_gt_ch)
+                            msg["accuracy"] = {
+                                "precision": round(_p_ch, 4),
+                                "recall": round(_r_ch, 4),
+                                "f_half": round(_fh_ch, 4),
+                                "tp": _mc_st_ch['tp'], "fp": _mc_st_ch['fp'], "fn": _mc_st_ch['fn'],
+                                "latency_ms": round(_lat_ch, 2),
+                                "n_gt": _n_gt_ch,
+                                "gt_progress": (round(_mc_st_ch['gt_ptr'] / _n_gt_ch, 4)
+                                                if _n_gt_ch > 0 else 0),
+                            }
+
+                    if ch == sc and viz_detail and pipeline_refs.get("network_visible", True) and bank.template:
+                        _mem_row = bank.template.mem[sc].detach().cpu()
+                        msg["l1_membrane"] = [round(float(v), 2) for v in _mem_row.tolist()]
+
+                    if ch == sc and viz_detail and convergence_snapshot:
+                        msg["convergence"] = [round(v, 3) for v in convergence_snapshot]
+                        msg["global_convergence"] = [round(v, 3) for v in convergence_snapshot]
+                    if ch == sc and viz_detail and probe_convergence_snapshot:
+                        msg["probe_convergence"] = [
+                            [round(v, 3) for v in row] for row in probe_convergence_snapshot
+                        ]
+
+                    await _broadcast(_json_dumps(msg))
+
                 for ch in range(C):
                     sample_buf[ch].clear()
                     dn_buf[ch].clear()
@@ -1159,21 +1221,28 @@ async def _process_stream_multi(
                 sc = pipeline_refs.get("selected_ch", 0)
                 _ps = max(1, int(cfg.probe_size))
                 if step_count % broadcast_stride == 0 and sample_buf[sc]:
-                    await _broadcast(json.dumps({
+                    common = {
                         "t": step_count,
+                        "selected_ch": sc,
                         "n_channels": C,
                         "probe_size": _ps,
                         "n_probes": (C + _ps - 1) // _ps,
                         "effective_fs": bank.preprocessors[0].effective_fs,
-                        "samples": list(sample_buf[sc]),
-                        "dn_flags": list(dn_buf[sc]),
                         "spikes": [],
-                        "control": 0, "confidence": 0,
-                        "selected_ch": sc,
+                        "control": 0,
+                        "confidence": 0,
                         "dn_open_selected": False,
                         "dec_gate_active": False,
-                    }))
+                    }
                     for ch2 in range(C):
+                        await _broadcast(
+                            _json_dumps({
+                                **common,
+                                "channel": ch2,
+                                "samples": list(sample_buf[ch2]),
+                                "dn_flags": list(dn_buf[ch2]),
+                            })
+                        )
                         sample_buf[ch2].clear()
                         dn_buf[ch2].clear()
                 if step_count % 2000 == 0:
@@ -1332,7 +1401,6 @@ async def _lsl_source(cfg: Config):
         )
 
     multi = len(ch_indices) > 1
-    multi = len(ch_indices) > 1
     frame_idx = 0
     while True:
         n_new = stream.n_new_samples
@@ -1342,10 +1410,6 @@ async def _lsl_source(cfg: Config):
 
         data, _ts = stream.get_data(winsize=n_new / sfreq)
         for i in range(data.shape[1]):
-            if multi:
-                yield frame_idx, data[ch_indices, i].astype(np.float32)
-            else:
-                yield frame_idx, float(data[ch_indices[0], i])
             if multi:
                 yield frame_idx, data[ch_indices, i].astype(np.float32)
             else:
@@ -1361,7 +1425,7 @@ async def _synthetic_source(cfg: Config):
     syn = cfg.synthetic
     C = cfg.n_channels
     C = cfg.n_channels
-    print(f"   🧪 Generating synthetic recording …")
+    print("   🧪 Generating synthetic recording …")
     print(f"      Duration : {syn.duration_s} s  |  Fs : {syn.fs} Hz  |  Channels : {C}")
     print(f"      Duration : {syn.duration_s} s  |  Fs : {syn.fs} Hz  |  Channels : {C}")
     print(f"      Units    : {syn.num_units}  |  Noise : {syn.noise_level}")
@@ -1369,11 +1433,7 @@ async def _synthetic_source(cfg: Config):
     recording, sorting = si.generate_ground_truth_recording(
         durations=[syn.duration_s],
         sampling_frequency=float(syn.fs),
-<<<<<<< HEAD
-        num_channels=syn.num_channels,
-=======
         num_channels=max(C, 1),
->>>>>>> 316d4a9 (running fast parallel, still low observability and no output from the final layer)
         num_units=syn.num_units,
         seed=syn.seed,
     )
@@ -1423,14 +1483,13 @@ async def _synthetic_source(cfg: Config):
 
 
 # ── Array source (for file playback) ──────────────────────────────────────────
-<<<<<<< HEAD
-async def _array_source(traces: np.ndarray, fs: float, name: str = "array",
-                        emit_done: bool = True):
-    """Yield samples from a pre-loaded numpy array at real-time pace."""
-    n = len(traces)
-    print(f"   ▶  Streaming {name}: {n} samples at {fs:.0f} Hz ({n/fs:.1f}s)")
-=======
-async def _array_source(traces: np.ndarray, fs: float, name: str = "array"):
+async def _array_source(
+    traces: np.ndarray,
+    fs: float,
+    name: str = "array",
+    *,
+    emit_done: bool = False,
+):
     """Yield samples from a pre-loaded numpy array at real-time pace.
 
     ``traces`` may be 1-D ``[T]`` (single channel) or 2-D ``[T, C]``
@@ -1441,13 +1500,8 @@ async def _array_source(traces: np.ndarray, fs: float, name: str = "array"):
     n = traces.shape[0]
     ch_label = f"{traces.shape[1]}ch" if is_multi else "1ch"
     print(f"   ▶  Streaming {name}: {n} samples × {ch_label} at {fs:.0f} Hz ({n/fs:.1f}s)")
->>>>>>> 316d4a9 (running fast parallel, still low observability and no output from the final layer)
     t0 = time.perf_counter()
     for i in range(n):
-        if is_multi:
-            yield i, traces[i]  # ndarray [C]
-        else:
-            yield i, float(traces[i])
         if is_multi:
             yield i, traces[i]  # ndarray [C]
         else:
@@ -1519,69 +1573,64 @@ async def _launch_mode(mode: str, **kwargs) -> dict:
                 noise_level=float(kwargs.get("noise_level", syn.noise_level)),
                 num_channels=num_channels,
             )
-            cfg = _repl(cfg, synthetic=syn, sampling_rate_hz=syn.fs)
+            # Also propagate n_channels so pipeline routing (>1 → _process_stream_multi)
+            # and ChannelBank instantiation both use the correct channel count.
+            cfg = _repl(cfg, synthetic=syn, sampling_rate_hz=syn.fs, n_channels=num_channels)
             _num_channels = num_channels
+            C = cfg.n_channels  # equals num_channels
 
-<<<<<<< HEAD
-            if num_channels > 1:
-                # Generate all channels at once, run batched multi-channel pipeline
-                recording, _ = si.generate_ground_truth_recording(
+            # Generate one independent recording per channel so each channel
+            # has its own spike trains and noise realisation.
+            print("   🧪 Generating synthetic recording …")
+            print(f"      Duration : {syn.duration_s} s  |  Fs : {syn.fs} Hz  |  {C} ch")
+            print(f"      Units/ch : {syn.num_units}  |  Noise : {syn.noise_level}")
+
+            channel_traces_list: list[np.ndarray] = []
+            gt_trains_per_ch_arr: list[np.ndarray] = []
+            for ch in range(C):
+                recording, sorting = si.generate_ground_truth_recording(
                     durations=[syn.duration_s],
                     sampling_frequency=float(syn.fs),
-                    num_channels=num_channels,
+                    num_channels=1,
                     num_units=syn.num_units,
-                    seed=syn.seed,
-=======
-            # Generate recording with ground truth for live accuracy
-            print(f"   🧪 Generating synthetic recording …")
-            print(f"      Duration : {syn.duration_s} s  |  Fs : {syn.fs} Hz")
-            print(f"      Units    : {syn.num_units}  |  Noise : {syn.noise_level}")
-
-            C = cfg.n_channels
-            recording, sorting = si.generate_ground_truth_recording(
-                durations=[syn.duration_s],
-                sampling_frequency=float(syn.fs),
-                num_channels=max(C, 1),
-                num_units=syn.num_units,
-                noise_kwargs={"noise_levels": syn.noise_level, "strategy": "on_the_fly"},
-                dtype="float32",
-                seed=syn.seed,
-            )
-            gt_trains = {}
-            for uid in sorting.unit_ids:
-                train = sorting.get_unit_spike_train(unit_id=uid, segment_index=0)
-                gt_trains[int(uid)] = train
-                rate = len(train) / syn.duration_s
-                print(f"      Unit {uid}: {len(train)} spikes ({rate:.1f} Hz)")
-            n_gt = sum(len(t) for t in gt_trains.values())
-
-            all_traces = recording.get_traces(segment_index=0)
-            if C > 1:
-                traces = all_traces[:, :C]  # [T, C]
-            else:
-                traces = all_traces[:, 0]   # [T]
-            source = _array_source(traces, float(syn.fs), "synthetic")
-            _stream_task = asyncio.create_task(
-                _process_stream(
-                    cfg,
-                    source,
-                    pace_realtime=syn.realtime,
-                    pace_fs=float(syn.fs),
-                    gt_spike_trains=gt_trains,
->>>>>>> 316d4a9 (running fast parallel, still low observability and no output from the final layer)
+                    noise_kwargs={"noise_levels": syn.noise_level, "strategy": "on_the_fly"},
+                    dtype="float32",
+                    seed=syn.seed + ch,
                 )
-                traces = recording.get_traces(segment_index=0)  # (n_samples, n_ch)
-                _stream_tasks.append(asyncio.create_task(
-                    _process_synthetic_batched(cfg, traces, float(syn.fs))
-                ))
+                ch_spike_trains: list[np.ndarray] = []
+                for uid in sorting.unit_ids:
+                    train = sorting.get_unit_spike_train(unit_id=uid, segment_index=0)
+                    ch_spike_trains.append(train)
+                    rate = len(train) / syn.duration_s
+                    print(f"      Ch {ch} Unit {uid}: {len(train)} spikes ({rate:.1f} Hz)")
+                channel_traces_list.append(recording.get_traces(segment_index=0)[:, 0])
+                gt_trains_per_ch_arr.append(
+                    np.sort(np.concatenate(ch_spike_trains)) if ch_spike_trains
+                    else np.empty(0, dtype=np.int64)
+                )
+
+            if C == 1:
+                traces: np.ndarray = channel_traces_list[0]           # [T]
+                gt_trains_single: dict | None = {0: gt_trains_per_ch_arr[0]}
+                gt_per_ch_arg: list | None = None
             else:
-                source = _synthetic_source(cfg)
-                _stream_tasks.append(asyncio.create_task(
+                traces = np.stack(channel_traces_list, axis=1)         # [T, C]
+                gt_trains_single = None
+                gt_per_ch_arg = gt_trains_per_ch_arr
+
+            source = _array_source(traces, float(syn.fs), "synthetic")
+            _stream_tasks.append(
+                asyncio.create_task(
                     _process_stream(
-                        cfg, source, channel_idx=0,
-                        pace_realtime=syn.realtime, pace_fs=float(syn.fs),
+                        cfg,
+                        source,
+                        pace_realtime=syn.realtime,
+                        pace_fs=float(syn.fs),
+                        gt_spike_trains=gt_trains_single,
+                        gt_spike_trains_per_ch=gt_per_ch_arg,
                     )
-                ))
+                )
+            )
             return {"status": "ok", "mode": "synthetic"}
 
         elif mode == "file":
@@ -1727,24 +1776,16 @@ async def _async_main(cfg: Config) -> None:
     _base_cfg = cfg
     mode = cfg.mode
 
-    _free_port(cfg.ws_port)
-
     n_l1 = cfg.l1.n_neurons
-<<<<<<< HEAD
-    print(f"\n⚡ SNN Agent  (pipeline server)")
-=======
     dev = cfg.resolve_device()
-    print(f"\n⚡ SNN Agent")
->>>>>>> 316d4a9 (running fast parallel, still low observability and no output from the final layer)
+    print("\n⚡ SNN Agent")
     print(f"   L1 neurons   →  {n_l1}")
-    print(f"   Channels     →  {cfg.n_channels}")
-    print(f"   Device       →  {dev}")
     print(f"   Channels     →  {cfg.n_channels}")
     print(f"   Device       →  {dev}")
     print(f"   Strategy     →  {cfg.decoder.strategy}")
     print(f"   WebSocket    →  ws://localhost:{cfg.ws_port}")
     print(f"   Mode         →  {mode}")
-    print(f"   Dashboard    →  run ./start.sh for the browser UI  (port 8000)\n")
+    print("   Dashboard    →  run ./start.sh for the browser UI  (port 8000)\n")
 
     _free_port(cfg.ws_port)
     # Bind WS before synthetic setup so a busy port fails fast (not after calibration).
@@ -1755,24 +1796,30 @@ async def _async_main(cfg: Config) -> None:
         cfg.ws_port,
         reuse_address=True,
     ):
-        if mode == "electrode":
-            loop = asyncio.get_running_loop()
-            queue = asyncio.Queue(maxsize=4096)
-            await loop.create_datagram_endpoint(
-                lambda: UDPReceiver(queue, ELEC_FMT, ELEC_FRAME_SIZE),
-                local_addr=("0.0.0.0", cfg.udp_electrode_port),
-            )
-            print(f"   Electrode in →  UDP port {cfg.udp_electrode_port}")
-            print(f"   Control out  →  UDP port {cfg.udp_control_port}\n")
-            await _launch_mode("electrode", queue=queue)
-        elif mode == "lsl":
-            print(f"   LSL stream   →  '{cfg.lsl.stream_name}'")
-            print(f"   Control out  →  UDP port {cfg.udp_control_port}\n")
-            await _launch_mode("lsl")
-        else:
-            await _launch_mode("synthetic")
+        bcast_task = asyncio.create_task(_broadcast_worker())
+        try:
+            if mode == "electrode":
+                loop = asyncio.get_running_loop()
+                queue = asyncio.Queue(maxsize=4096)
+                await loop.create_datagram_endpoint(
+                    lambda: UDPReceiver(queue, ELEC_FMT, ELEC_FRAME_SIZE),
+                    local_addr=("0.0.0.0", cfg.udp_electrode_port),
+                )
+                print(f"   Electrode in →  UDP port {cfg.udp_electrode_port}")
+                print(f"   Control out  →  UDP port {cfg.udp_control_port}\n")
+                await _launch_mode("electrode", queue=queue)
+            elif mode == "lsl":
+                print(f"   LSL stream   →  '{cfg.lsl.stream_name}'")
+                print(f"   Control out  →  UDP port {cfg.udp_control_port}\n")
+                await _launch_mode("lsl")
+            else:
+                await _launch_mode("synthetic")
 
-        await asyncio.Future()  # run forever
+            await asyncio.Future()  # run forever
+        finally:
+            bcast_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await bcast_task
 
 
 _BEST_CONFIG_PATH = Path(__file__).resolve().parent.parent.parent.parent / "data" / "best_config.json"
@@ -1821,19 +1868,6 @@ def main() -> None:
         help="Ignore data/best_config.json and use built-in defaults",
     )
     parser.add_argument(
-<<<<<<< HEAD
-        "--config",
-        default=None,
-        metavar="PATH",
-        help="Path to a config JSON file (overrides --no-optimized)",
-    )
-    parser.add_argument(
-        "--channels",
-        type=int,
-        default=None,
-        metavar="N",
-        help="Number of parallel synthetic channels (default: 1)",
-=======
         "--channels", "-C",
         type=int,
         default=None,
@@ -1858,7 +1892,6 @@ def main() -> None:
         default=None,
         metavar="PORT",
         help="WebSocket port (default: config ws_port, usually 8765)",
->>>>>>> 316d4a9 (running fast parallel, still low observability and no output from the final layer)
     )
     parser.add_argument(
         "--config",
@@ -1883,8 +1916,6 @@ def main() -> None:
         cfg = DEFAULT_CONFIG
         if not args.no_optimized:
             print("ℹ  No optimized config found — using built-in defaults")
-    else:
-        cfg = DEFAULT_CONFIG
 
     if args.mode:
         cfg = cfg.with_overrides(mode=args.mode)

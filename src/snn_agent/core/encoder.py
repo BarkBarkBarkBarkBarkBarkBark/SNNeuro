@@ -122,36 +122,6 @@ class SpikeEncoder:
         self.n_centers = len(self.centers)
         self.n_afferents = self.n_centers * self.twindow
 
-<<<<<<< HEAD
-        # ── Circular ring buffer (replaces old shift register) ────────
-        self._ring_len = self.n_centers * self.step_size * self.twindow
-        self._ring = np.zeros(self._ring_len, dtype=bool)
-        self._ring_head = 0
-
-        # ── Pre-build read indices for subsampled delay taps ──────────
-        # The original code did:
-        #   reshaped = ring.reshape(step_size*twindow, n_centres).T
-        #   out = reshaped[:, ::step_size]  # shape [n_centres, twindow]
-        #   return out.ravel()
-        #
-        # We pre-compute the flat indices so each step is just a gather.
-        # Row c, col t in the [n_centres × twindow] output corresponds to
-        # flat ring position:  (t * step_size) * n_centres + c
-        # Indices are relative to the *oldest* entry in the ring, which
-        # at read time sits at ring_head (because we just advanced head
-        # past the newest write).
-        nc = self.n_centers
-        ss = self.step_size
-        tw = self.twindow
-        indices = np.empty(self.n_afferents, dtype=np.intp)
-        k = 0
-        for c in range(nc):
-            for t in range(tw):
-                indices[k] = (t * ss) * nc + c
-                k += 1
-        self._read_indices = indices
-        self._out_buf = np.empty(self.n_afferents, dtype=bool)
-=======
         nc = self.n_centers
 
         # 2-D shift register [n_centers, step_size * twindow] — C-contiguous.
@@ -173,7 +143,6 @@ class SpikeEncoder:
 
         # Active indices cache — updated every step, read by sparse downstream layers
         self._active_indices: np.ndarray = np.empty(0, dtype=np.intp)
->>>>>>> 316d4a9 (running fast parallel, still low observability and no output from the final layer)
 
         self._abs_buf.clear()
         self._calibrated = True

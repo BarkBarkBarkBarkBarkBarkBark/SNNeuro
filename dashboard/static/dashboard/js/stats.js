@@ -52,6 +52,12 @@ export function update(msg) {
 
 export function setChannel(ch) {
   activeChannel = ch;
+  totalL1 = 0;
+  totalDN = 0;
+  lastCheck = performance.now();
+  _pendingNG = 1.0;
+  _pendingInh = false;
+  _pendingHex = '0x0000';
 }
 
 function _set(id, val) {

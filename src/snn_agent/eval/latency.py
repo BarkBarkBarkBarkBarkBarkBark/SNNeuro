@@ -25,11 +25,13 @@ pipeline step, critical for closed-loop human experiments).
 
 from __future__ import annotations
 
+# ruff: noqa: E402
+
 import csv
 import json
 import time
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -379,7 +381,7 @@ def measure_latency(
                       f"median={samp['median']:.0f}  mean={samp['mean']:.1f}  "
                       f"P95={samp['p95']:.0f}  max={samp['max']:.0f}")
 
-        print(f"\n  ── Wall-Clock Performance ──")
+        print("\n  ── Wall-Clock Performance ──")
         wc = wall_clock
         ps = wc["per_step_us"]
         print(f"     Total:     {wc['total_s']:.2f}s for {wc['samples_processed']} steps")
@@ -392,7 +394,7 @@ def measure_latency(
               f"(could sustain this sample rate in real time)")
 
         if len(per_unit) > 1:
-            print(f"\n  ── Per-Unit Breakdown ──")
+            print("\n  ── Per-Unit Breakdown ──")
             for uid, info in per_unit.items():
                 cms = info["ctrl_latency_ms"]
                 if cms["n"] > 0:

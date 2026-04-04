@@ -86,6 +86,15 @@ export function setTimeWindow(ms) {
 
 export function setChannel(ch) {
   activeChannel = ch;
+  // Flush ring so old-channel data doesn't linger
+  ringHead = 0;
+  ring.fill(0);
+  dnRing.fill(0);
+  ngRing.fill(1);
+  ctrlRing.fill(0);
+  waveMax = 1e-6;
+  pendingInhActive = false;
+  _clearAll();
 }
 
 // ── Internal render ───────────────────────────────────────────────────────────

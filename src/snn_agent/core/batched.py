@@ -849,7 +849,6 @@ class ConvergenceLayer:
         self.device = device
 
         tm = cc.tm_samples
-        beta = float(np.exp(-1.0 / tm))
 
         self.threshold = float(cc.threshold_factor * n_input)
         self.refractory = cc.refractory_samples

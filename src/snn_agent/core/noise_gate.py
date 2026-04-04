@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import math
 
-import numpy as np
 
 from snn_agent.config import Config
 

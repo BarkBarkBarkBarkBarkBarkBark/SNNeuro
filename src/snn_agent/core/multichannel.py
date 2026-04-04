@@ -423,7 +423,6 @@ class ChannelBank:
 
         # ── DEC — sparse path (WTA → at most 1 active per channel) ────
         dec_spikes_np = None
-        dec_spikes_t  = None
         hex_outputs   = self._hex_outputs  # pre-alloc [C] uint16
         hex_outputs[:] = 0
 
@@ -577,7 +576,6 @@ class ChannelBank:
 
         # ── DEC + convergence + decoders — per-step loop ──────────────────────
         results: list[dict] = []
-        dec_N_DEC = self.dec_layer.N_DEC if self.dec_layer is not None else 0
 
         for i in range(N):
             l1_i  = l1_spk_block[i]     # [C, n_neurons] bool — view

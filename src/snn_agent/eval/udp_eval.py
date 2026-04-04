@@ -55,7 +55,6 @@ def _make_gt(
     """Generate synthetic GT spike trains.  Returns {unit_id: sample_indices}."""
     try:
         import spikeinterface.core.generate as si_gen
-        import spikeinterface as si
     except ImportError:
         print("ERROR: spikeinterface not installed.  Install with: uv pip install spikeinterface")
         sys.exit(1)
@@ -123,7 +122,6 @@ class BitUnitAssigner:
         """Greedy assignment: returns {bit_idx: unit_id}."""
         # Build score matrix
         all_bits = list(range(1, self.n_bits + 1))
-        all_units = list(self.counts.keys() or range(self.n_units))
 
         # Collect all (score, bit, unit) triples, sorted descending
         candidates = []
@@ -249,7 +247,7 @@ def run(args: argparse.Namespace) -> None:
     sock.settimeout(0.1)
     print(f"\n   📡 Listening on UDP :{args.port}  (start `snn-serve --mode synthetic` now)")
     print(f"   ⏳ Warm-up: first {args.assign_after:.0f}s ({assign_after_samp} samples) for bit→unit assignment")
-    print(f"   Ctrl-C to stop and save results\n")
+    print("   Ctrl-C to stop and save results\n")
 
     assigner = BitUnitAssigner(n_bits=15, n_units=args.units)
     evaluator: SpikeEvaluator | None = None
@@ -364,7 +362,7 @@ def run(args: argparse.Namespace) -> None:
     print("\n" + "─" * 70)
     if evaluator is not None:
         m = evaluator.metrics()
-        print(f"   📊 Final results (scoring phase, ±2 ms tolerance)")
+        print("   📊 Final results (scoring phase, ±2 ms tolerance)")
         print(f"      Precision : {m['precision']:.4f}  ({m['precision']*100:.1f}%)")
         print(f"      Recall    : {m['recall']:.4f}  ({m['recall']*100:.1f}%)")
         print(f"      F½        : {m['f_half']:.4f}  ({m['f_half']*100:.1f}%)")

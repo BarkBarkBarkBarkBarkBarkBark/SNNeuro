@@ -97,24 +97,6 @@ class Preprocessor:
 
         return [x]
 
-<<<<<<< HEAD
-    def step_batch(self, samples: np.ndarray) -> np.ndarray:
-        """
-        Process a chunk of raw samples in one vectorised call.
-
-        Parameters
-        ----------
-        samples : np.ndarray
-            1-D float array of raw electrode samples.
-
-        Returns
-        -------
-        np.ndarray
-            1-D float array of filtered, decimated samples.
-            May be shorter than input (decimation) or empty.
-        """
-        x = np.asarray(samples, dtype=np.float64)
-=======
     def step_chunk(self, samples: np.ndarray) -> np.ndarray:
         """
         Ingest a chunk of raw samples for one channel.
@@ -132,23 +114,11 @@ class Preprocessor:
             current decimation counter.
         """
         x = samples.astype(np.float64)
->>>>>>> 316d4a9 (running fast parallel, still low observability and no output from the final layer)
 
         if self.do_bandpass:
             x, self._zi = sosfilt(self._sos, x, zi=self._zi)
 
         if self.do_decimate:
-<<<<<<< HEAD
-            # Continue the decimation counter from where step() left off
-            # Find indices that land on the decimation stride
-            start = (self.dec_factor - self._dec_count) % self.dec_factor
-            x = x[start::self.dec_factor]
-            # Update counter for next call
-            total = len(samples)
-            self._dec_count = (self._dec_count + total) % self.dec_factor
-
-        return x
-=======
             return self.decimate_chunk(x)
 
         return x
@@ -165,4 +135,3 @@ class Preprocessor:
         keep_idx = np.arange(remaining - 1, len(x), self.dec_factor)
         self._dec_count = (self._dec_count + len(x)) % self.dec_factor
         return x[keep_idx]
->>>>>>> 316d4a9 (running fast parallel, still low observability and no output from the final layer)

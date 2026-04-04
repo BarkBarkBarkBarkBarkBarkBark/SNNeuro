@@ -56,6 +56,13 @@ export function update(msg) {
 
 export function setChannel(ch) {
   activeChannel = ch;
+  membrane.fill(0);
+  dnActive  = false;
+  ngFactor  = 1.0;
+  inhActive = false;
+  l1Spikes  = new Set();
+  decSpikes = new Set();
+  decHex    = '0x0000';
 }
 
 // ── Render (capped at 15 fps via throttle) ────────────────────────────────────

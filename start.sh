@@ -25,6 +25,8 @@ CHANNELS=1
 WEB_PORT=8000
 CONFIG=""
 EXTRA_PIPELINE_ARGS=""
+FREE_PORTS=0
+WS_PORT=8765
 
 # ── Arg parsing ───────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -32,7 +34,9 @@ while [[ $# -gt 0 ]]; do
     --mode)        MODE="$2";                 shift 2 ;;
     --channels)    CHANNELS="$2";            shift 2 ;;
     --web-port)    WEB_PORT="$2";            shift 2 ;;
+    --ws-port)     WS_PORT="$2";             shift 2 ;;
     --config)      CONFIG="$2";              shift 2 ;;
+    --free-ports)  FREE_PORTS=1;              shift 1 ;;
     --help|-h)
       sed -n '2,15p' "$0" | sed 's/^# \?//'
       exit 0
@@ -43,6 +47,37 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+_port_pids() {
+  local port="$1"
+  lsof -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true
+}
+
+_free_port() {
+  local port="$1"
+  local pids
+  pids="$(_port_pids "$port")"
+  if [[ -z "$pids" ]]; then
+    return 0
+  fi
+
+  echo "⚠  Port $port is already in use by PID(s): $pids"
+  if [[ "$FREE_PORTS" != "1" ]]; then
+    echo "   Re-run with: ./start.sh --free-ports (kills listeners on $port)"
+    echo "   Or choose a different port: ./start.sh --web-port 8001"
+    exit 1
+  fi
+
+  echo "   Freeing port $port …"
+  # Try graceful, then force.
+  kill $pids 2>/dev/null || true
+  sleep 0.2
+  pids="$(_port_pids "$port")"
+  if [[ -n "$pids" ]]; then
+    kill -9 $pids 2>/dev/null || true
+    sleep 0.2
+  fi
+}
 
 # ── Locate virtualenv ─────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -67,6 +102,9 @@ fi
 if [[ -n "$CONFIG" ]]; then
   PIPELINE_CMD+=(--config "$CONFIG")
 fi
+
+# Ports (WS port must match the browser UI expectation)
+PIPELINE_CMD+=(--ws-port "$WS_PORT")
 
 # ── Build daphne command ───────────────────────────────────────────────────────
 DAPHNE_CMD=(
@@ -98,8 +136,15 @@ echo "   ───────────────────────�
 echo "   Browser →  http://${HOST_IP}:${WEB_PORT}/"
 echo "   ──────────────────────────────────────────────────"
 echo ""
+echo "   VS Code Remote-SSH: forward ports ${WEB_PORT} and ${WS_PORT}, then open:"
+echo "   http://localhost:${WEB_PORT}/"
+echo ""
 echo "   Press Ctrl+C to stop both processes."
 echo ""
+
+# ── Preflight: avoid confusing port-in-use failures ─────────────────────────
+_free_port "$WEB_PORT"
+_free_port "$WS_PORT"
 
 # ── Start pipeline in background ──────────────────────────────────────────────
 cd "$SCRIPT_DIR"

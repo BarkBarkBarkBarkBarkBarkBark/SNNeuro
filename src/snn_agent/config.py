@@ -12,7 +12,6 @@ All parameters for the SNN pipeline live here.  Override individual fields via
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Literal
 
 
@@ -207,7 +206,7 @@ class Config:
     # Multi-channel
     n_channels: int = 1
     probe_size: int = 8  # channels per stereotactic probe (grid + local convergence grouping)
-    device: str = "auto"  # "auto" | "cuda" | "cpu"
+    device: str = "cuda"  # "auto" | "cuda" | "cpu"
 
     # Feature flags
     use_dec: bool = True

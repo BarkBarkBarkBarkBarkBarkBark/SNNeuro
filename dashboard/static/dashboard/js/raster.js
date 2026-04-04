@@ -75,6 +75,12 @@ export function setTimeWindow(ms) {
 
 export function setChannel(ch) {
   activeChannel = ch;
+  // Flush event queues so old-channel spikes don't linger
+  l1Head = 0;
+  decHead = 0;
+  sampleClock = 0;
+  if (rastCtx) _clear(rastCtx, RASTER_H);
+  if (decCtx)  _clear(decCtx,  DEC_H);
 }
 
 // ── Internal render ───────────────────────────────────────────────────────────

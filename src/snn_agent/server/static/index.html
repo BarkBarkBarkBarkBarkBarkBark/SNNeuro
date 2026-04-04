@@ -228,8 +228,6 @@ canvas {
   width: 100%;
   min-height: 14px;
 }
-<<<<<<< HEAD
-=======
 
 /* ── Accuracy panel ───────────────────────────────────────── */
 #accuracy_panel {
@@ -404,7 +402,6 @@ canvas {
 /* ── Convergence heatmap ─────────────────────────────── */
 #conv_panel { display: none; margin-top: 4px; }
 #conv_panel.active { display: block; }
->>>>>>> 316d4a9 (running fast parallel, still low observability and no output from the final layer)
 </style>
 </head>
 <body>
@@ -677,9 +674,6 @@ canvas {
       <span class="ctrl-val" id="ttl_high_val">1.0</span>
     </div>
   </div>
-<<<<<<< HEAD
-</div>
-=======
 
   <div class="ctrl-group">
     <div class="ctrl-title">Display</div>
@@ -698,7 +692,6 @@ canvas {
   </div>
 
 </div><!-- /controls -->
->>>>>>> e90ee95 (parallel working, output layer not spiking, about to go mideval)
 
 <div id="status">● connecting…</div>
 
@@ -1785,8 +1778,6 @@ ttlHSlider.addEventListener('input', () => {
   sendCmd('ttl_high', v);
 });
 
-<<<<<<< HEAD
-=======
 // DEC unit threshold slider
 const decThrSlider = document.getElementById('dec_thr_slider');
 const decThrVal = document.getElementById('dec_thr_val');
@@ -1836,8 +1827,6 @@ zoomSlider.addEventListener('input', () => {
   const msVisible = Math.round(CVW * currentSPP / 20);
   zoomVal.textContent = `×${currentSPP} (${msVisible} ms)`;
 });
-
->>>>>>> e90ee95 (parallel working, output layer not spiking, about to go mideval)
 // ── Source launcher controls ──────────────────────────────────────────────────
 const modeLabel   = document.getElementById('mode_label');
 const modeDot     = document.getElementById('mode_dot');

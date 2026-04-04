@@ -82,12 +82,12 @@ def main() -> None:
     sfreq = raw.info["sfreq"]
     chunk_latency_ms = args.chunk_size / sfreq * 1000
 
-    print(f"\n▶️  LSL stream started")
+    print("\n▶️  LSL stream started")
     print(f"   Name         : {args.name}")
     print(f"   Sfreq        : {sfreq:.0f} Hz")
     print(f"   Chunk size   : {args.chunk_size}  ({chunk_latency_ms:.2f} ms)")
     print(f"   Repeat       : {'∞' if np.isinf(n_rep) else int(n_rep)}")
-    print(f"\n   Waiting for consumers…  (Ctrl+C to stop)\n")
+    print("\n   Waiting for consumers…  (Ctrl+C to stop)\n")
 
     try:
         while True:

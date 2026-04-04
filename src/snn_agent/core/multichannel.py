@@ -21,7 +21,12 @@ from snn_agent.core.noise_gate import NoiseGateNeuron
 from snn_agent.core.inhibition import GlobalInhibitor
 from snn_agent.core.decoder import ControlDecoder
 from snn_agent.core.batched import BatchedAttentionNeuron, BatchedTemplateLayer, BatchedDECLayer, ConvergenceLayer
-from snn_agent.core._numba_kernels import warmup_kernels, encode_block_kernel
+from snn_agent.core._numba_kernels import (
+    warmup_kernels,
+    encode_block_kernel,
+    template_lif_wta_block,
+    template_lif_wta_block_parallel,
+)
 
 __all__ = ["ChannelBank"]
 
@@ -324,6 +329,46 @@ class ChannelBank:
         print("   🔥 Warming up Numba JIT kernels…", end=" ", flush=True)
         warmup_kernels(C=min(C, 2), A=min(self.max_aff, 8), L=min(cfg.l1.n_neurons, 16), N=2)
         print("done")
+
+        # ── Auto-benchmark: serial vs parallel Numba kernel ───────────────────
+        # Use realistic array sizes so the result reflects actual pipeline cost.
+        print("   ⚡ Selecting kernel strategy…", end=" ", flush=True)
+        import time as _bench_t
+        _bN, _bA, _bL = 64, self.max_aff, cfg.l1.n_neurons
+        _b_ab  = (np.random.rand(_bN, C, _bA) > 0.95).astype(np.bool_)
+        _b_af  = _b_ab.astype(np.float32)
+        _b_dn  = np.zeros((_bN, C), dtype=np.float32)
+        _b_sup = np.ones((_bN, C),  dtype=np.float32)
+        _b_W   = np.random.rand(C, _bA, _bL).astype(np.float32)
+        _b_mem = np.zeros((C, _bL), dtype=np.float32)
+        _b_lp  = np.full((C, _bA), -9999, dtype=np.int64)
+        _b_lpo = np.full((C, _bL), -9999, dtype=np.int64)
+        _b_spk = np.zeros((_bN, C, _bL), dtype=bool)
+        _b_cur = np.zeros((C, _bL), dtype=np.float32)
+        _b_mag = np.zeros(C, dtype=np.float32)
+        _b_args = (
+            _b_ab, _b_af, _b_W, _b_mem, _b_lp, _b_lpo, _b_spk, _b_cur, _b_mag,
+            _b_dn, _b_sup, np.int64(0), np.float32(self.template.beta),
+            np.float32(self.template.threshold),
+            np.int64(cfg.l1.refractory_samples), np.float32(cfg.l1.dn_weight), False,
+            np.float32(cfg.l1.stdp_ltp), np.float32(cfg.l1.stdp_ltd),
+            np.int64(cfg.l1.stdp_ltp_window),
+            np.float32(cfg.l1.w_lo), np.float32(cfg.l1.w_hi),
+        )
+        _REPS = 8
+        _bt0 = _bench_t.perf_counter()
+        for _ in range(_REPS):
+            template_lif_wta_block(*_b_args)
+        _ts = (_bench_t.perf_counter() - _bt0) / _REPS
+        _bt0 = _bench_t.perf_counter()
+        for _ in range(_REPS):
+            template_lif_wta_block_parallel(*_b_args)
+        _tp = (_bench_t.perf_counter() - _bt0) / _REPS
+        self.use_parallel_kernels = _tp < _ts * 0.90
+        _ratio = _ts / max(_tp, 1e-9)
+        _choice = "parallel ✓" if self.use_parallel_kernels else "serial ✓"
+        print(f"serial={_ts*1e3:.1f}ms  parallel={_tp*1e3:.1f}ms  → {_choice} ({_ratio:.2f}×)")
+        del _b_ab, _b_af, _b_W, _b_mem, _b_lp, _b_lpo, _b_spk, _b_cur, _b_mag, _b_dn, _b_sup
 
         # ── Build batch encoder state for Numba encode_block_kernel ──────────
         # All channels must be calibrated at this point.

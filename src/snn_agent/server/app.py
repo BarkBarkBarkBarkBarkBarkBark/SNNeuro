@@ -39,9 +39,13 @@ import time
 from contextlib import suppress
 from pathlib import Path
 
-# Prevent PyTorch/OpenMP from spawning threads for tiny matmuls.
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("MKL_NUM_THREADS", "1")
+# Maximise CPU thread pools.  Hot path is Numba (NUMBA_NUM_THREADS);
+# sosfilt preprocessing uses OpenBLAS/scipy via OMP_NUM_THREADS.
+_n_cpu = str(os.cpu_count() or 4)
+os.environ.setdefault("OMP_NUM_THREADS",       _n_cpu)
+os.environ.setdefault("OPENBLAS_NUM_THREADS",  _n_cpu)
+os.environ.setdefault("MKL_NUM_THREADS",       _n_cpu)
+os.environ.setdefault("NUMBA_NUM_THREADS",     _n_cpu)
 
 import numpy as np
 import torch

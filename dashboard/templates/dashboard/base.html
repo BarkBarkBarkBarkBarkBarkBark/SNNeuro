@@ -13,6 +13,7 @@
   <span class="nav-brand">⚡ SNN AGENT</span>
   <a href="{% url 'input' %}"   class="nav-link {% if request.resolver_match.url_name == 'input'   %}active{% endif %}">INPUT</a>
   <a href="{% url 'monitor' %}" class="nav-link {% if request.resolver_match.url_name == 'monitor' %}active{% endif %}">MONITOR</a>
+  <a href="{% url 'docs' %}"    class="nav-link {% if request.resolver_match.url_name == 'docs_page' or request.resolver_match.url_name == 'docs' %}active{% endif %}">DOCS</a>
   <span id="ws-status-nav" class="ws-status">● pipeline: —</span>
 </nav>
 

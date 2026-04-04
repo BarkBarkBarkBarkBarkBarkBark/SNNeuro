@@ -1,0 +1,154 @@
+{% extends "dashboard/base.html" %}
+{% load static %}
+
+{% block title %}Docs — {{ active_name }}{% endblock %}
+
+{% block extra_head %}
+<!-- KaTeX for LaTeX rendering -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+        onload="renderMathInElement(document.getElementById('doc-content'), {
+          delimiters: [
+            {left: '$$', right: '$$', display: true},
+            {left: '$', right: '$', display: false}
+          ],
+          throwOnError: false
+        });"></script>
+{% endblock %}
+
+{% block content %}
+<div class="docs-layout">
+
+  {# ── Sidebar ─────────────────────────────────────────────────── #}
+  <aside class="docs-sidebar">
+    <h2>📄 DOCS</h2>
+    <nav>
+      {% for d in docs %}
+      <a href="{% url 'docs_page' slug=d.slug %}"
+         class="docs-nav-item {% if d.slug == active_slug %}active{% endif %}"
+         title="{{ d.filename }}">
+        <span class="docs-ext">{{ d.ext }}</span>
+        {{ d.name }}
+      </a>
+      {% endfor %}
+    </nav>
+
+    <div class="docs-config-toggle">
+      <button id="btn-show-config" class="btn-config" onclick="toggleConfig()">
+        ⚙ HYPERPARAMETERS
+      </button>
+    </div>
+
+    <div id="config-panel" class="docs-config-panel" style="display:none;">
+      <div class="config-loading">Loading…</div>
+    </div>
+  </aside>
+
+  {# ── Main content ────────────────────────────────────────────── #}
+  <main class="docs-main">
+    <div id="doc-content" class="docs-content">
+      {{ content_html|safe }}
+    </div>
+  </main>
+
+</div>
+
+<script>
+let configLoaded = false;
+
+function toggleConfig() {
+  const panel = document.getElementById('config-panel');
+  const visible = panel.style.display !== 'none';
+  panel.style.display = visible ? 'none' : 'block';
+  if (!configLoaded) loadConfig();
+}
+
+async function loadConfig() {
+  configLoaded = true;
+  const panel = document.getElementById('config-panel');
+  try {
+    const resp = await fetch('{% url "api_config" %}');
+    const data = await resp.json();
+    panel.innerHTML = renderConfig(data.defaults, data.best);
+  } catch (e) {
+    panel.innerHTML = '<div class="config-err">Failed to load config</div>';
+  }
+}
+
+function renderConfig(defaults, best) {
+  // Flatten best-config keys for quick lookup
+  const bestFlat = best || {};
+
+  // Map flat best-config keys → [group, attr]
+  const flatToGroup = {
+    enc_overlap: ['encoder','overlap'], enc_dvm_factor: ['encoder','dvm_factor'],
+    enc_step_size: ['encoder','step_size'], enc_window_depth: ['encoder','window_depth'],
+    dn_threshold_factor: ['dn','threshold_factor'], dn_depression_tau: ['dn','depression_tau'],
+    dn_depression_frac: ['dn','depression_frac'],
+    l1_n_neurons: ['l1','n_neurons'], l1_dn_weight: ['l1','dn_weight'],
+    l1_stdp_ltp: ['l1','stdp_ltp'], l1_stdp_ltd: ['l1','stdp_ltd'],
+    inh_duration_ms: ['inhibition','duration_ms'], inh_strength_threshold: ['inhibition','strength_threshold'],
+    ng_process_noise: ['noise_gate','process_noise'], ng_inhibit_below_sd: ['noise_gate','inhibit_below_sd'],
+    ng_suppression_factor: ['noise_gate','suppression_factor'], ng_ema_alpha: ['noise_gate','ema_alpha'],
+    dec_dn_window_ms: ['dec','dn_window_ms'],
+  };
+
+  // Build a map: group → attr → best_value
+  const bestByGroup = {};
+  for (const [fk, val] of Object.entries(bestFlat)) {
+    const mapping = flatToGroup[fk];
+    if (mapping) {
+      const [g, a] = mapping;
+      if (!bestByGroup[g]) bestByGroup[g] = {};
+      bestByGroup[g][a] = val;
+    }
+  }
+
+  const groups = ['preprocess','encoder','dn','l1','inhibition','noise_gate','dec','decoder'];
+  const groupLabels = {
+    preprocess: '🔧 Preprocessor', encoder: '📡 Encoder', dn: '⚡ Attention (DN)',
+    l1: '🧠 Template Layer (L1)', inhibition: '🚫 Global Inhibitor',
+    noise_gate: '🔇 Noise Gate', dec: '🎯 DEC Layer', decoder: '📤 Decoder',
+  };
+
+  let html = '';
+  for (const g of groups) {
+    const params = defaults[g];
+    if (!params || typeof params !== 'object') continue;
+    const bestG = bestByGroup[g] || {};
+
+    html += `<div class="config-group">`;
+    html += `<div class="config-group-title">${groupLabels[g] || g}</div>`;
+    for (const [k, defaultVal] of Object.entries(params)) {
+      const hasBest = k in bestG;
+      const bestVal = hasBest ? bestG[k] : null;
+      const displayVal = hasBest ? fmtNum(bestVal) : fmtNum(defaultVal);
+      const cls = hasBest ? 'config-val tuned' : 'config-val';
+      const badge = hasBest ? '<span class="badge-tuned">tuned</span>' : '';
+
+      html += `<div class="config-row">`;
+      html += `  <span class="config-key">${k}</span>`;
+      html += `  <span class="${cls}">${displayVal}</span>${badge}`;
+      if (hasBest) {
+        html += `<span class="config-default">(default: ${fmtNum(defaultVal)})</span>`;
+      }
+      html += `</div>`;
+    }
+    html += `</div>`;
+  }
+  return html;
+}
+
+function fmtNum(v) {
+  if (typeof v === 'number') {
+    if (Number.isInteger(v)) return v.toString();
+    if (Math.abs(v) < 0.001) return v.toExponential(2);
+    return parseFloat(v.toPrecision(5)).toString();
+  }
+  if (typeof v === 'boolean') return v ? 'true' : 'false';
+  if (v === null || v === undefined) return '—';
+  return String(v);
+}
+</script>
+{% endblock %}

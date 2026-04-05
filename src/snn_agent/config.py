@@ -35,6 +35,11 @@ class EncoderConfig:
     step_size: int = 2
     window_depth: int = 10
     noise_init_samples: int = 8000
+    # After calibration, round n_centers up to the next power of 2 so every
+    # channel shares the same afferent width.  This eliminates dead zero-padding
+    # in the weight matrix and aligns the BLAS matmul dimension to a power of 2.
+    # Set False only if you need to reproduce the exact pre-padding behaviour.
+    pad_to_pow2_centers: bool = True
 
 
 @dataclass(frozen=True, slots=True)

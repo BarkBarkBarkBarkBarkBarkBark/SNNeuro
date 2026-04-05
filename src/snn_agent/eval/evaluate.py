@@ -110,80 +110,90 @@ def evaluate_pipeline(
     _early_exit = False
     any_l1_fired_prev = False
 
+    # ── Pre-process entire trace in one sosfilt call ────────────────────────
+    # Replaces n_total individual step() calls (each invoking sosfilt on a
+    # single element) with one vectorised call — major speedup for eval runs.
+    decimated_all = preproc.step_chunk(traces.astype(np.float64))
+    n_dec = len(decimated_all)
+    # Compute the original raw-sample frame index for each decimated output.
+    # Preprocessor._dec_count starts at 0, so the first kept raw index is
+    # (dec_factor - 1) and subsequent ones are spaced dec_factor apart.
+    if preproc.do_decimate:
+        _df = preproc.dec_factor
+        _raw_frames = np.arange(_df - 1, n_total, _df, dtype=np.int64)[:n_dec]
+    else:
+        _raw_frames = np.arange(n_dec, dtype=np.int64)
+
     try:
-        for frame_idx in range(n_total):
-            raw = float(traces[frame_idx])
-            processed = preproc.step(raw)
-            if not processed:
+        for dec_idx in range(n_dec):
+            pp_sample = float(decimated_all[dec_idx])
+            frame_idx = int(_raw_frames[dec_idx])
+            step_count += 1
+            afferents = encoder.step(pp_sample)
+
+            if not encoder.is_calibrated:
                 continue
 
-            for pp_sample in processed:
-                step_count += 1
-                afferents = encoder.step(pp_sample)
-
-                if not encoder.is_calibrated:
-                    continue
-
-                if pipeline_obj is None:
-                    pipeline_obj = complete_pipeline(
-                        cfg, effective_cfg, preproc, encoder
+            if pipeline_obj is None:
+                pipeline_obj = complete_pipeline(
+                    cfg, effective_cfg, preproc, encoder
+                )
+                if verbose:
+                    print(
+                        f"  ✅ Calibrated: {encoder.n_afferents} afferents "
+                        f"({preproc.effective_fs} Hz)"
                     )
+
+                # Reachability check
+                _w_max = float(pipeline_obj.template.W.max())
+                _n_active_est = min(
+                    encoder.n_afferents,
+                    int(cfg.encoder.overlap * cfg.encoder.window_depth),
+                )
+                _max_current = _n_active_est * _w_max + pipeline_obj.template.dn_weight
+                _beta = float(np.exp(-1.0 / cfg.l1.tm_samples))
+                _v_ss = _max_current / (1.0 - _beta)
+                if _v_ss < pipeline_obj.template.threshold * 0.8:
                     if verbose:
                         print(
-                            f"  ✅ Calibrated: {encoder.n_afferents} afferents "
-                            f"({preproc.effective_fs} Hz)"
+                            f"  ⚠ L1 threshold "
+                            f"{pipeline_obj.template.threshold:.0f} "
+                            f"unreachable (V_ss≈{_v_ss:.0f}) — skipping"
                         )
+                    raise _ThresholdUnreachable()
 
-                    # Reachability check
-                    _w_max = float(pipeline_obj.template.W.max())
-                    _n_active_est = min(
-                        encoder.n_afferents,
-                        int(cfg.encoder.overlap * cfg.encoder.window_depth),
-                    )
-                    _max_current = _n_active_est * _w_max + pipeline_obj.template.dn_weight
-                    _beta = float(np.exp(-1.0 / cfg.l1.tm_samples))
-                    _v_ss = _max_current / (1.0 - _beta)
-                    if _v_ss < pipeline_obj.template.threshold * 0.8:
-                        if verbose:
-                            print(
-                                f"  ⚠ L1 threshold "
-                                f"{pipeline_obj.template.threshold:.0f} "
-                                f"unreachable (V_ss≈{_v_ss:.0f}) — skipping"
-                            )
-                        raise _ThresholdUnreachable()
+            dn_spike = pipeline_obj.attention.step(afferents)
 
-                dn_spike = pipeline_obj.attention.step(afferents)
+            # Noise gate suppression
+            suppression = 1.0
+            if pipeline_obj.noise_gate is not None:
+                suppression = pipeline_obj.noise_gate.step(pp_sample)
 
-                # Noise gate suppression
-                suppression = 1.0
-                if pipeline_obj.noise_gate is not None:
-                    suppression = pipeline_obj.noise_gate.step(pp_sample)
+            # Global inhibition
+            if pipeline_obj.inhibitor is not None:
+                max_current = pipeline_obj.template.last_current_magnitude
+                inh_factor = pipeline_obj.inhibitor.gate(max_current, any_l1_fired_prev)
+                suppression *= inh_factor
 
-                # Global inhibition
-                if pipeline_obj.inhibitor is not None:
-                    max_current = pipeline_obj.template.last_current_magnitude
-                    inh_factor = pipeline_obj.inhibitor.gate(max_current, any_l1_fired_prev)
-                    suppression *= inh_factor
+            l1_spikes = pipeline_obj.template.step(afferents, dn_spike, suppression)
+            any_l1_fired_prev = bool(np.any(l1_spikes))
 
-                l1_spikes = pipeline_obj.template.step(afferents, dn_spike, suppression)
-                any_l1_fired_prev = bool(np.any(l1_spikes))
-
-                # Optional DEC decoder layer
-                decoder_input = l1_spikes
-                if pipeline_obj.dec_layer is not None:
-                    dec_spikes = pipeline_obj.dec_layer.step(l1_spikes, dn_spike)
-                    for idx in np.flatnonzero(dec_spikes):
-                        nid = int(idx)
-                        dec_spike_log.setdefault(nid, []).append(frame_idx)
-                    decoder_input = dec_spikes
-
-                pipeline_obj.decoder.step(decoder_input, dn_spike)
-
-                for idx in np.flatnonzero(l1_spikes):
+            # Optional DEC decoder layer
+            decoder_input = l1_spikes
+            if pipeline_obj.dec_layer is not None:
+                dec_spikes = pipeline_obj.dec_layer.step(l1_spikes, dn_spike)
+                for idx in np.flatnonzero(dec_spikes):
                     nid = int(idx)
-                    l1_spike_log.setdefault(nid, []).append(frame_idx)
+                    dec_spike_log.setdefault(nid, []).append(frame_idx)
+                decoder_input = dec_spikes
 
-            if verbose and frame_idx % 100_000 == 0 and frame_idx > 0:
+            pipeline_obj.decoder.step(decoder_input, dn_spike)
+
+            for idx in np.flatnonzero(l1_spikes):
+                nid = int(idx)
+                l1_spike_log.setdefault(nid, []).append(frame_idx)
+
+            if verbose and dec_idx % 25_000 == 0 and dec_idx > 0:
                 pct = 100 * frame_idx / n_total
                 print(f"  ⏳ {pct:.0f}%")
 

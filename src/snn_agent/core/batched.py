@@ -330,7 +330,7 @@ class BatchedTemplateLayer:
                     for ch, w in zip(kch.tolist(), kn.tolist()):
                         self._stdp(ch, w)
 
-        self._spk_t.copy_(torch.from_numpy(spk))
+        # _spk_t shares memory with _spk_np via torch.from_numpy — no copy needed.
         return self._spk_t
 
     def step_sparse(

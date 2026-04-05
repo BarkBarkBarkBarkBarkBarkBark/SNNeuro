@@ -60,11 +60,14 @@ class ControlDecoder:
         else:
             self.weights = np.array(dec.weights, dtype=np.float64)
 
-        # Rate strategy — sliding window
+        # Rate strategy — sliding window.
+        # Stores per-step weighted dot-product floats rather than full spike arrays,
+        # enabling an O(1) running sum that avoids the O(window × n) re-accumulation.
         win_samples = max(2, int(dec.window_ms * 1e-3 * self._fs))
         self._rate_window = win_samples
-        self._spike_buf: deque[np.ndarray] = deque(maxlen=win_samples)
+        self._spike_buf: deque[float] = deque(maxlen=win_samples)
         self._max_rate_hz = float(dec.max_rate_hz)
+        self._rate_weighted_sum: float = 0.0  # O(1) running weighted spike count
 
         # Population strategy — leaky integrator
         tau_samples = dec.leaky_tau_ms * 1e-3 * self._fs
@@ -141,19 +144,21 @@ class ControlDecoder:
     def _step_rate(
         self, spikes: np.ndarray, confidence: float
     ) -> tuple[float, float]:
-        self._spike_buf.append(spikes.copy())
+        # O(1) per step: compute the weighted dot product for the new entry,
+        # subtract the evicted entry's stored float, no full re-accumulation.
+        new_val = float(np.dot(self.weights, spikes))
+        if len(self._spike_buf) == self._spike_buf.maxlen:
+            self._rate_weighted_sum -= self._spike_buf[0]
+        self._rate_weighted_sum += new_val
+        self._spike_buf.append(new_val)
+
         buf_len = len(self._spike_buf)
         if buf_len < 2:
             return (0.0, confidence)
 
-        counts = np.zeros(self.n, dtype=np.float64)
-        for s in self._spike_buf:
-            counts += s.astype(np.float64)
-
         # Convert to Hz then normalise to [-1, 1]
         window_sec = buf_len / self._fs
-        weighted_count = float(np.dot(self.weights, counts))
-        rate_hz = weighted_count / max(window_sec, 1e-10)
+        rate_hz = self._rate_weighted_sum / max(window_sec, 1e-10)
         control = float(np.clip(rate_hz / self._max_rate_hz, -1.0, 1.0))
         return (control, confidence)
 

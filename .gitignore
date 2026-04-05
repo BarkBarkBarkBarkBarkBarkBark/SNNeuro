@@ -29,3 +29,5 @@ Spiking-Neural-Networks-Tutorials/
 
 # Legacy root-level files (replaced by src/snn_agent/)
 # Keep these listed until the old files are fully removed.
+
+test.ipynb

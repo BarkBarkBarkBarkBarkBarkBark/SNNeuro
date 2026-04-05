@@ -185,7 +185,8 @@ class DECLayer:
         out[:] = False
 
         # ── Update delay buffer ───────────────────────────────────────
-        self._delay_buf.append(l1_spikes.astype(bool, copy=True))
+        if self.use_delays:
+            self._delay_buf.append(l1_spikes.astype(bool, copy=True))
 
         # ── DN gate: integrate while DN is active or within post-DN window ──
         if dn_spike:

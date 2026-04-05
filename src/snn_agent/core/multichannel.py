@@ -26,6 +26,13 @@ from snn_agent.core._numba_kernels import warmup_kernels, encode_block_kernel
 __all__ = ["ChannelBank"]
 
 
+def _next_pow2(x: int) -> int:
+    """Return the smallest power of 2 that is >= *x*."""
+    if x <= 1:
+        return 1
+    return 1 << (x - 1).bit_length()
+
+
 class ChannelBank:
     """
     Manages C independent single-channel CPU components plus batched GPU layers.
@@ -235,6 +242,28 @@ class ChannelBank:
         cfg = self.cfg
         effective_cfg = self.effective_cfg
         C = self.C
+
+        # ── Pad all encoders to a uniform power-of-2 n_centers ──────────────────
+        # After independent per-channel calibration each encoder may have a
+        # different n_centers (and therefore n_afferents = n_centers × twindow).
+        # Padding to the same power-of-2 n_centers:
+        #   • makes every channel's afferent vector identical in length
+        #   • removes dead zero-columns from the weight matrix W_np
+        #   • aligns the BLAS matmul's leading (afferent) dimension to pow-2
+        #   • gives the Numba encode_block_kernel a uniform inner-loop count
+        # Extra dummy centres are placed at sig_max + dvm×1000 so they are
+        # never within dvm of any real signal and never activate.
+        if cfg.encoder.pad_to_pow2_centers:
+            raw_max_nc = max(enc.n_centers for enc in self.encoders)
+            target_nc  = _next_pow2(raw_max_nc)
+            if any(enc.n_centers != target_nc for enc in self.encoders):
+                for enc in self.encoders:
+                    enc.pad_to_n_centers(target_nc)
+                new_naff = self.encoders[0].n_afferents
+                print(
+                    f"   📐 Afferents padded: {raw_max_nc} → {target_nc} centres "
+                    f"({new_naff} afferents per channel, uniform pow-2 centres)"
+                )
 
         n_affs = [enc.n_afferents for enc in self.encoders]
         self.max_aff = max(n_affs)

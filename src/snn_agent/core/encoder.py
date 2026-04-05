@@ -106,6 +106,55 @@ class SpikeEncoder:
     def is_calibrated(self) -> bool:
         return self._calibrated
 
+    # ── post-calibration reshape ───────────────────────────────────────
+    def pad_to_n_centers(self, target_nc: int) -> None:
+        """
+        Extend the encoder's amplitude-bin grid to exactly *target_nc* centres.
+
+        Extra centres are placed at ``sig_max + dvm × 1000`` — well outside
+        the calibrated signal range — so they are **never activated** during
+        inference (``|sample − dummy| ≫ dvm``).  All internal arrays are
+        resized in-place so the encoder's ``step()`` continues to work
+        correctly without any caller changes.
+
+        Call this **after** calibration (``is_calibrated`` must be True) and
+        **before** building any downstream layers.  No-op when
+        ``target_nc <= self.n_centers``.
+        """
+        assert self._calibrated, "pad_to_n_centers requires a calibrated encoder"
+        old_nc = self.n_centers
+        if target_nc <= old_nc:
+            return
+
+        extra = target_nc - old_nc
+
+        # Dummy centres: place them far outside the real signal range so they
+        # can never satisfy |sample − centre| <= dvm.
+        dummy_val = self._sig_max + self.dvm * 1000.0
+        dummy_centers = np.full(extra, dummy_val, dtype=np.float64)
+        self.centers = np.concatenate([self.centers, dummy_centers])
+
+        # Extend the shift register with zero rows for the new dummy centres.
+        reg_width = self.step_size * self.twindow
+        new_reg = np.zeros((target_nc, reg_width), dtype=bool)
+        new_reg[:old_nc, :] = self._shift_reg_2d
+        self._shift_reg_2d = new_reg
+
+        # Update counts.
+        self.n_centers = target_nc
+        self.n_afferents = target_nc * self.twindow
+
+        # Rebuild per-step scratch buffers (size changed).
+        self._abs_diff    = np.empty(target_nc, dtype=np.float64)
+        self._active_bool = np.empty(target_nc, dtype=bool)
+
+        # Rebuild afferent output buffer / live view.
+        if self.step_size == 1:
+            self._aff_out = self._shift_reg_2d.ravel()          # zero-copy live view
+        else:
+            self._aff_out    = np.zeros(self.n_afferents, dtype=bool)
+            self._aff_out_2d = self._aff_out.reshape(target_nc, self.twindow)
+
     # ── internals ─────────────────────────────────────────────────────
     def _calibrate(self) -> None:
         arr = np.array(self._abs_buf, dtype=np.float64)
